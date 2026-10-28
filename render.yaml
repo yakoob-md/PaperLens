@@ -1,0 +1,16 @@
+services:
+  - type: web
+    name: paperlens-api
+    runtime: docker
+    rootDir: backend
+    plan: free
+    healthCheckPath: /health
+    envVars:
+      - key: CORS_ORIGINS
+        value: https://YOUR-FRONTEND-URL
+      - key: MCP_ENABLED
+        value: "true"
+      - key: GROQ_API_KEY
+        sync: false
+      - key: GOOGLE_API_KEY
+        sync: false
