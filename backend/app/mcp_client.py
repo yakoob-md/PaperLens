@@ -4,7 +4,7 @@ Provides structured execution of tools hosted on the FastMCP server, formatted
 with standard MCP JSON-RPC 2.0 envelopes and complete protocol telemetry.
 """
 
-import json, time, uuid, datetime, sys
+import asyncio, json, time, uuid, datetime, sys
 from pathlib import Path
 from typing import Any
 from .config import settings
@@ -66,7 +66,7 @@ async def call_mcp_tool(
         tool_map = _get_mcp_tools()
         if name in tool_map:
             fn = tool_map[name]
-            raw_result = fn(**sanitized_args)
+            raw_result = await asyncio.to_thread(fn, **sanitized_args)
         else:
             status = "FAILED"
             raw_result = {"error": f"Unknown tool: '{name}'"}

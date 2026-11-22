@@ -32,11 +32,9 @@ TOXIC_ABUSIVE_PATTERNS = [
     r"\b(hack|exploit|ddos|steal|phish|malware|ransomware|trojan)\b",
 ]
 
-def validate_paper_text(text: str, max_chars: int = 80000) -> str:
-    """Enforce strict length and character boundaries on uploaded paper content."""
+def validate_paper_text(text: str) -> str:
+    """Require enough extractable text for paper review."""
     text = text.strip()
-    if len(text) > max_chars:
-        raise HTTPException(413, f"Guardrail Violation: Text exceeds {max_chars:,} characters.")
     if len(text) < 80:
         raise HTTPException(422, "Guardrail Violation: Provide at least 80 characters of paper text.")
     return text
@@ -72,20 +70,20 @@ def check_academic_scope(text: str) -> tuple[bool, str]:
         return True, f"Academic scope confirmed: matched {matches}/3 scientific structural patterns."
     return False, "Low academic signal: text may be casual prose or an incomplete excerpt."
 
-def audit_layer1_input(title: str, text: str, max_chars: int = 80000) -> list[GuardrailAudit]:
+def audit_layer1_input(title: str, text: str) -> list[GuardrailAudit]:
     """Run all Layer 1 Ingestion Guardrails and generate audit records."""
     audits = []
     
     # 1. Size boundary check
-    is_valid_size = 80 <= len(text) <= max_chars
+    is_valid_size = len(text) >= 80
     audits.append(GuardrailAudit(
         id=f"g1-size-{str(uuid.uuid4())[:6]}",
         layer="Layer 1: Input Ingestion",
         guardrail_name="Input Size & Character Boundary Guardrail",
         status="PASSED" if is_valid_size else "BLOCKED",
         code_location="backend/app/guardrails.py :: validate_paper_text()",
-        policy_description="Enforce input length within [80, 80,000] characters to prevent memory exhaustion and DoS.",
-        audit_findings=f"Paper '{title[:35]}' text length: {len(text):,} chars. Boundary limits: [80, {max_chars:,}]."
+        policy_description="Require at least 80 characters of paper text.",
+        audit_findings=f"Paper '{title[:35]}' text length: {len(text):,} chars. Minimum: 80."
     ))
     
     # 2. Prompt injection scanner

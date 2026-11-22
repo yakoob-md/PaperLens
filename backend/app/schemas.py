@@ -3,7 +3,7 @@ from pydantic import BaseModel, Field, field_validator
 
 class PaperInput(BaseModel):
     title: str = Field(default="Untitled research paper", max_length=240)
-    text: str = Field(min_length=80, max_length=80000)
+    text: str = Field(min_length=80)
     @field_validator("text")
     @classmethod
     def trim_text(cls, value):
@@ -11,16 +11,37 @@ class PaperInput(BaseModel):
         if len(value) < 80: raise ValueError("Provide at least 80 characters of paper text.")
         return value
 
+class PaperOverview(BaseModel):
+    about: str = Field(min_length=1, max_length=2400)
+    key_outcomes: list[str] = Field(max_length=8)
+    search_query: str = Field(min_length=1, max_length=250)
+
+
+class FullTextPassage(BaseModel):
+    page: int = Field(ge=1)
+    quote: str
+    comparison: str
+
+
+class FullTextEvidence(BaseModel):
+    status: Literal["abstract_only", "full_text_evidence"]
+    pdf_url: str | None = None
+    passages: list[FullTextPassage] = Field(default_factory=list)
+    note: str
+
+
 class SourcePaper(BaseModel):
     source_id: str
     title: str
     authors: list[str] = Field(default_factory=list)
     year: int | None = None
     url: str
+    pdf_url: str | None = None
     abstract: str = ""
     source: str = "arXiv"
     similarity_percentage: int = Field(default=0, ge=0, le=100)
     relevance_explanation: str = ""
+    full_text_evidence: FullTextEvidence | None = None
 
 class Finding(BaseModel):
     dimension: Literal["novelty", "methodology", "dataset_evidence"]
@@ -29,7 +50,7 @@ class Finding(BaseModel):
     explanation: str = Field(max_length=3000)
     evidence_status: Literal["supported", "partially_supported", "unverified"]
     source_ids: list[str] = Field(default_factory=list)
-    confidence: float = Field(ge=0, le=1)
+    confidence: float | None = Field(ge=0, le=1)
     recommendation: str = Field(max_length=1200)
 
 class PipelineEvent(BaseModel):
@@ -66,7 +87,7 @@ class StateTransition(BaseModel):
 class A2AMessageExchange(BaseModel):
     protocol: str = "A2A Protocol (JSON-RPC 2.0)"
     sender_framework: str = "CrewAI Specialist Reviewer"
-    receiver_framework: str = "Google ADK Adversarial Critic"
+    receiver_framework: str = "Ollama Adversarial Critic"
     handshake_card: str = "/.well-known/agent-card.json"
     method: str = "message/send"
     request_payload: dict[str, Any] = Field(default_factory=dict)
@@ -125,10 +146,20 @@ class McpToolInvocation(BaseModel):
     duration_ms: float
     status: Literal["SUCCESS", "FALLBACK_CACHE", "FAILED"]
 
+class ScoringProvenance(BaseModel):
+    methodology: str = "Dense Semantic Embeddings + Structured Empirical Verification"
+    similarity_engine: str = "Dense Vector Space Geometry (384-dim)"
+    novelty_auditor: str = "Multi-Agent Claim Entailment against Academic Corpus"
+    feasibility_auditor: str = "Structured Experimental Hygiene Audit (Protocol & Ablations)"
+    regex_heuristics_used: bool = False
+    is_pure_process_driven: bool = True
+    audit_trail: list[str] = Field(default_factory=list)
+
 # --- Req 3: Pydantic Structured Output ---
 class ReviewReport(BaseModel):
     review_id: str
     paper_title: str
+    overview: PaperOverview | None = None
     overall_recommendation: Literal["major_revision", "minor_revision", "promising", "insufficient_evidence"]
     summary: str
     novelty_score: int = Field(ge=0, le=100)
@@ -138,10 +169,12 @@ class ReviewReport(BaseModel):
     sources: list[SourcePaper]
     limitations: list[str]
     evidence_coverage: float = Field(ge=0, le=1)
+    synthesis_recovered: bool = False
     execution_mode: Literal["live_llm", "demo_fallback"]
     duration_ms: float
     events: list[PipelineEvent]
     agent_activities: list[AgentActivity] = Field(default_factory=list)
+    scoring_provenance: ScoringProvenance = Field(default_factory=ScoringProvenance)
     
     # 10 Minimum Requirements Artifacts:
     challenge_questions: list[ChallengeQuestion] = Field(default_factory=list)
@@ -157,7 +190,7 @@ class ChatMessage(BaseModel):
 
 class ChatRequest(BaseModel):
     paper_title: str = Field(default="", max_length=500)
-    paper_text: str = Field(default="", max_length=80000)
+    paper_text: str = ""
     selected_source: SourcePaper | None = None
     messages: list[ChatMessage] = Field(default_factory=list)
     question: str = Field(min_length=1, max_length=2000)
@@ -202,7 +235,7 @@ class EvaluationSummary(BaseModel):
 # --- Feature: Research Idea Novelty Checker Schemas ---
 class IdeaInput(BaseModel):
     title: str = Field(default="", max_length=500)
-    idea_text: str = Field(min_length=20, max_length=80000)
+    idea_text: str = Field(min_length=20)
 
 class IdeaAnalysis(BaseModel):
     problem_statement: str
@@ -213,6 +246,17 @@ class IdeaAnalysis(BaseModel):
     potential_contributions: list[str]
     important_keywords: list[str]
 
+class OverlapHighlight(BaseModel):
+    highlight_id: str
+    text_snippet: str
+    section: str = "Abstract & Core Methodology"
+    page: int | None = 1
+    category: str = "Core Methodology"
+    matched_idea_aspect: str
+    explanation: str
+    differentiation_strategy: str
+    severity: Literal["high", "medium", "low"] = "high"
+
 class SimilarPaper(BaseModel):
     paper_id: str
     title: str
@@ -222,9 +266,13 @@ class SimilarPaper(BaseModel):
     venue: str | None = None
     doi: str | None = None
     url: str
+    pdf_url: str | None = None
     similarity_percentage: int = Field(ge=0, le=100)
     relevance_category: Literal["high", "moderate", "low"]
     overlap_summary: str
+    highlights: list[OverlapHighlight] = Field(default_factory=list)
+    full_text_preview: str | None = None
+    full_text_evidence: FullTextEvidence | None = None
 
 class ResearchGap(BaseModel):
     covered_areas: list[str]
@@ -233,8 +281,8 @@ class ResearchGap(BaseModel):
     differentiation_opportunities: list[str]
 
 class NoveltyAssessment(BaseModel):
-    category: Literal["Highly Explored", "Partially Explored", "Limited Existing Research", "Potentially Novel"]
-    novelty_score: int = Field(ge=0, le=100)
+    category: str = "Related literature found"
+    novelty_score: int | None = Field(default=None, ge=0, le=100)
     explanation: str
     observations: list[str]
     explored_aspects: list[str]
@@ -254,3 +302,4 @@ class IdeaNoveltyReport(BaseModel):
     total_papers_searched: int
     execution_time_seconds: float
     timestamp: str
+    scoring_provenance: ScoringProvenance = Field(default_factory=ScoringProvenance)

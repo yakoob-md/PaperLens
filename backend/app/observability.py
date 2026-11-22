@@ -1,7 +1,7 @@
 """Observability, Tracing, Task Monitoring, and Callbacks.
 
 Provides full provenance, execution flow monitoring, and callback hooks for
-CrewAI, Google ADK, and MCP tools, with optional Langfuse tracing integration.
+CrewAI, Ollama, and MCP tools, with optional Langfuse tracing integration.
 """
 
 from datetime import datetime, timezone

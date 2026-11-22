@@ -50,7 +50,7 @@ Open `http://localhost:5173` in your browser.
 - **Explanation for Professors**:
   > *"We implemented defense-in-depth across 4 distinct architectural boundaries:"*
   1. **Layer 1 (Input Ingestion Guardrails)**:
-     - `validate_paper_text()`: Enforces length bounds `[80, 80,000]` characters to prevent memory exhaustion.
+     - `validate_paper_text()`: Requires at least 80 characters of extractable paper text.
      - `detect_prompt_injection()`: Scans against 8 adversarial injection signatures (jailbreaks, developer mode, system prompt leaks).
      - `check_toxic_or_abusive_content()`: Filters abusive or hostile phrasing.
      - `check_academic_scope()`: Classifies whether input text contains scientific structure.

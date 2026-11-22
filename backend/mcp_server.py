@@ -7,6 +7,16 @@ mcp = FastMCP("paperlens-research-tools")
 # Curated high-relevance academic literature repository for reliable offline benchmarking
 BENCHMARK_LITERATURE = [
     {
+        "source_id": "arxiv-1706.03762",
+        "title": "Attention Is All You Need",
+        "authors": ["Ashish Vaswani", "Noam Shazeer", "Niki Parmar", "Jakob Uszkoreit", "Llion Jones", "Aidan N. Gomez", "Lukasz Kaiser", "Illia Polosukhin"],
+        "published": "2017",
+        "url": "https://arxiv.org/abs/1706.03762",
+        "abstract": "The dominant sequence transduction models are based on complex recurrent or convolutional neural networks that include an encoder and a decoder. The best performing models also connect the encoder and decoder through an attention mechanism. We propose a new simple network architecture, the Transformer, based solely on attention mechanisms, dispensing with recurrence and convolutions entirely. Experiments on two machine translation tasks show these models to be superior in quality while being more parallelizable and requiring significantly less time to train.",
+        "source": "arXiv",
+        "topics": ["attention", "transformer", "neural", "network", "sequence", "translation", "self-attention", "encoder", "decoder", "multi-head"]
+    },
+    {
         "source_id": "arxiv-2305.14314",
         "title": "QLoRA: Efficient Finetuning of Quantized LLMs",
         "authors": ["Tim Dettmers", "Artidoro Pagnoni", "Ari Holtzman", "Luke Zettlemoyer"],
@@ -112,12 +122,20 @@ def _get_benchmark_fallback(source_filter: str | None = None, query: str = "", m
     return [p for _, p in scored[:max_n]]
 
 @mcp.tool()
-def search_arxiv(query: str, max_results: int = 5) -> dict:
+def search_arxiv(query: str, max_results: int = 5, use_cache: bool = True) -> dict:
     """Search public arXiv preprint metadata and abstracts."""
     n = max(1, min(int(max_results), 8))
-    url = "https://export.arxiv.org/api/query?" + urllib.parse.urlencode({
-        "search_query": f"all:{query[:160]}", "start": 0, "max_results": n,
-        "sortBy": "relevance", "sortOrder": "descending"})
+    clean_q = query.strip()
+    m_id = re.search(r"\b(\d{4}\.\d{4,5})(?:v\d+)?\b", clean_q)
+    if m_id:
+        url = f"https://export.arxiv.org/api/query?id_list={m_id.group(1)}&max_results={n}"
+    else:
+        clean_text = re.sub(r'[^\w\s]', ' ', clean_q).strip()
+        url = "https://export.arxiv.org/api/query?" + urllib.parse.urlencode({
+            "search_query": f'ti:"{clean_text[:80]}" OR all:{clean_text[:120]}',
+            "start": 0, "max_results": n,
+            "sortBy": "relevance", "sortOrder": "descending"
+        })
     try:
         req = urllib.request.Request(url, headers={"User-Agent": "PaperLens/1.0"})
         with urllib.request.urlopen(req, timeout=5) as r:
@@ -133,18 +151,22 @@ def search_arxiv(query: str, max_results: int = 5) -> dict:
                 "published": e.findtext("a:published", default="", namespaces=ns)[:4],
                 "url": e.findtext("a:id", default="", namespaces=ns),
                 "abstract": " ".join(e.findtext("a:summary", default="", namespaces=ns).split())[:1500],
-                "source": "arXiv"
+                "source": "arXiv",
+                "pdf_url": next((link.get("href") for link in e.findall("a:link", ns)
+                                 if link.get("type") == "application/pdf"), None),
             })
         if papers:
             return {"papers": papers, "count": len(papers), "mode": "live_network"}
     except Exception:
         pass
         
+    if not use_cache:
+        return {"papers": [], "count": 0, "mode": "live_results_unavailable"}
     fallback = _get_benchmark_fallback("arXiv", query, n)
     return {"papers": fallback, "count": len(fallback), "mode": "curated_academic_cache"}
 
 @mcp.tool()
-def search_openalex(query: str, max_results: int = 5) -> dict:
+def search_openalex(query: str, max_results: int = 5, use_cache: bool = True) -> dict:
     """Search OpenAlex open catalog of 250M+ scientific articles and conference proceedings."""
     n = max(1, min(int(max_results), 8))
     clean_q = urllib.parse.quote(query[:160])
@@ -161,7 +183,9 @@ def search_openalex(query: str, max_results: int = 5) -> dict:
                 continue
             authors = [a.get("author", {}).get("display_name", "") for a in r_item.get("authorships", [])[:5] if a.get("author")]
             year = r_item.get("publication_year")
-            url_link = r_item.get("doi") or r_item.get("id") or "https://openalex.org"
+            primary = r_item.get("primary_location") or {}
+            open_access = r_item.get("best_oa_location") or {}
+            url_link = primary.get("landing_page_url") or r_item.get("doi") or r_item.get("id") or "https://openalex.org"
             abstract = _reconstruct_openalex_abstract(r_item.get("abstract_inverted_index"))
             oa_id = str(r_item.get("id", "")).split("/")[-1] or str(len(papers) + 1)
             papers.append({
@@ -170,19 +194,22 @@ def search_openalex(query: str, max_results: int = 5) -> dict:
                 "authors": [a for a in authors if a],
                 "published": str(year) if year else None,
                 "url": url_link,
-                "abstract": abstract or f"OpenAlex catalog indexed work published in {year or 'recent years'}.",
-                "source": "OpenAlex"
+                "abstract": abstract,
+                "source": "OpenAlex",
+                "pdf_url": open_access.get("pdf_url") or primary.get("pdf_url"),
             })
         if papers:
             return {"papers": papers, "count": len(papers), "mode": "live_network"}
     except Exception:
         pass
 
+    if not use_cache:
+        return {"papers": [], "count": 0, "mode": "live_results_unavailable"}
     fallback = _get_benchmark_fallback("OpenAlex", query, n)
     return {"papers": fallback, "count": len(fallback), "mode": "curated_academic_cache"}
 
 @mcp.tool()
-def search_crossref(query: str, max_results: int = 5) -> dict:
+def search_crossref(query: str, max_results: int = 5, use_cache: bool = True) -> dict:
     """Search CrossRef catalog of 150M+ published DOI articles, IEEE, ACM, Springer, Elsevier."""
     n = max(1, min(int(max_results), 8))
     clean_q = urllib.parse.quote(query[:160])
@@ -212,19 +239,23 @@ def search_crossref(query: str, max_results: int = 5) -> dict:
                 "authors": [a for a in authors if a],
                 "published": str(year) if year else None,
                 "url": url_link,
-                "abstract": abstract or f"Published scholarly publication in {item.get('container-title', ['academic proceedings'])[0] if item.get('container-title') else 'peer-reviewed literature'}.",
-                "source": "CrossRef"
+                "abstract": abstract,
+                "source": "CrossRef",
+                "pdf_url": next((link.get("URL") for link in (item.get("link") or [])
+                                 if link.get("content-type") == "application/pdf"), None),
             })
         if papers:
             return {"papers": papers, "count": len(papers), "mode": "live_network"}
     except Exception:
         pass
 
+    if not use_cache:
+        return {"papers": [], "count": 0, "mode": "live_results_unavailable"}
     fallback = _get_benchmark_fallback("CrossRef", query, n)
     return {"papers": fallback, "count": len(fallback), "mode": "curated_academic_cache"}
 
 @mcp.tool()
-def search_academic_literature(query: str, max_results: int = 8) -> dict:
+def search_academic_literature(query: str, max_results: int = 8, use_cache: bool = True) -> dict:
     """Federated multi-source search querying arXiv, OpenAlex, and CrossRef simultaneously."""
     total_papers = []
     seen_titles = set()
@@ -232,7 +263,7 @@ def search_academic_literature(query: str, max_results: int = 8) -> dict:
 
     # 1. Query arXiv
     try:
-        arxiv_res = search_arxiv(query=query, max_results=3)
+        arxiv_res = search_arxiv(query=query, max_results=3, use_cache=use_cache)
         for p in arxiv_res.get("papers", []):
             norm_title = "".join(re.findall(r"[a-z0-9]", p["title"].lower()))
             if norm_title and norm_title not in seen_titles:
@@ -244,7 +275,7 @@ def search_academic_literature(query: str, max_results: int = 8) -> dict:
 
     # 2. Query OpenAlex
     try:
-        oa_res = search_openalex(query=query, max_results=3)
+        oa_res = search_openalex(query=query, max_results=3, use_cache=use_cache)
         for p in oa_res.get("papers", []):
             norm_title = "".join(re.findall(r"[a-z0-9]", p["title"].lower()))
             if norm_title and norm_title not in seen_titles:
@@ -256,7 +287,7 @@ def search_academic_literature(query: str, max_results: int = 8) -> dict:
 
     # 3. Query CrossRef
     try:
-        cr_res = search_crossref(query=query, max_results=3)
+        cr_res = search_crossref(query=query, max_results=3, use_cache=use_cache)
         for p in cr_res.get("papers", []):
             norm_title = "".join(re.findall(r"[a-z0-9]", p["title"].lower()))
             if norm_title and norm_title not in seen_titles:
@@ -267,7 +298,7 @@ def search_academic_literature(query: str, max_results: int = 8) -> dict:
         pass
 
     # If all sources were empty, ensure high-quality fallback
-    if not total_papers:
+    if not total_papers and use_cache:
         for p in BENCHMARK_LITERATURE[:max_results]:
             src = p.get("source", "arXiv")
             total_papers.append(p)

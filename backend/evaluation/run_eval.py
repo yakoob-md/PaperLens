@@ -10,19 +10,15 @@ if str(backend_dir) not in sys.path:
     sys.path.insert(0, str(backend_dir))
 
 from app.pipeline import run_review
+from app.llm import ModelUnavailable
 from app.schemas import EvaluationSummary, EvaluationCaseResult
 
 cases_file = Path(__file__).with_name("sample_cases.jsonl")
 cases = [json.loads(x) for x in cases_file.read_text(encoding="utf-8").splitlines() if x.strip()]
 
-# Pricing per million tokens (Standard production rates: $0.59 / 1M input, $0.79 / 1M output)
-INPUT_COST_PER_M = 0.59
-OUTPUT_COST_PER_M = 0.79
-
 async def evaluate_all_cases() -> EvaluationSummary:
     out: list[EvaluationCaseResult] = []
     total_latency = 0.0
-    total_estimated_cost = 0.0
 
     print(f"\n================================================================================")
     print(f"PAPERLENS: END-TO-END PERFORMANCE, COST & RUNNING TIME BENCHMARK")
@@ -41,13 +37,6 @@ async def evaluate_all_cases() -> EvaluationSummary:
             # Token & cost estimation based on input size, system prompts, and multi-agent outputs
             approx_input_tokens = len(c["text"]) // 4 + 1800  # text + multi-agent system instructions
             approx_output_tokens = 950  # specialist notes + critique + summary
-            estimated_cost_usd = round(
-                (approx_input_tokens * INPUT_COST_PER_M / 1_000_000) + 
-                (approx_output_tokens * OUTPUT_COST_PER_M / 1_000_000), 
-                6
-            )
-            total_estimated_cost += estimated_cost_usd
-
             passed_guardrails = sum(1 for g in report.guardrail_audits if g.status == "PASSED")
 
             case_res = EvaluationCaseResult(
@@ -61,12 +50,14 @@ async def evaluate_all_cases() -> EvaluationSummary:
                 sources_retrieved=len(report.sources),
                 findings_count=len(report.findings),
                 estimated_tokens=approx_input_tokens + approx_output_tokens,
-                estimated_cost_usd=estimated_cost_usd,
+                estimated_cost_usd=0.0,
                 guardrails_passed=passed_guardrails,
                 mode=report.execution_mode
             )
             out.append(case_res)
-            print(f"       ✓ Completed in {running_time_s}s ({elapsed_ms} ms) | Est. Cost: ${estimated_cost_usd} | Guardrails: {passed_guardrails}/{len(report.guardrail_audits)} Passed")
+            print(f"       ✓ Completed in {running_time_s}s ({elapsed_ms} ms) | Local Ollama | Guardrails: {passed_guardrails}/{len(report.guardrail_audits)} Passed")
+        except ModelUnavailable:
+            raise
         except Exception as e:
             print(f"       ✗ Error evaluating {c['id']}: {e}")
 
@@ -74,8 +65,8 @@ async def evaluate_all_cases() -> EvaluationSummary:
         total_cases_evaluated=len(out),
         average_latency_ms=round(total_latency / max(1, len(out)), 2),
         average_running_time_s=round(total_latency / max(1, len(out)) / 1000, 2),
-        total_estimated_cost_usd=round(total_estimated_cost, 6),
-        average_cost_per_review_usd=round(total_estimated_cost / max(1, len(out)), 6),
+        total_estimated_cost_usd=0.0,
+        average_cost_per_review_usd=0.0,
         results=out
     )
 
