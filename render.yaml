@@ -2,13 +2,20 @@ services:
   - type: web
     name: paperlens-api
     runtime: docker
-    rootDir: backend
     plan: free
     healthCheckPath: /health
     envVars:
-      - key: CORS_ORIGINS
-        value: https://YOUR-FRONTEND-URL
       - key: MCP_ENABLED
         value: "true"
-      - key: OLLAMA_URL
+      - key: PORT
+        value: "8000"
+      - key: GROQ_API_KEY
+        sync: false
+      - key: GOOGLE_API_KEY
+        sync: false
+      - key: LANGFUSE_PUBLIC_KEY
+        sync: false
+      - key: LANGFUSE_SECRET_KEY
+        sync: false
+      - key: LANGFUSE_BASE_URL
         sync: false

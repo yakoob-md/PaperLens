@@ -20,7 +20,7 @@ from typing import Literal
 from .progress import progress
 from .full_text import check_full_text, supported_pdf
 from .config import settings
-from .llm import preferred_model, complete, ModelUnavailable
+from .llm import preferred_model, complete, excerpt, ModelUnavailable
 from .schemas import IdeaAnalysis, IdeaNoveltyReport, NoveltyAssessment, OverlapHighlight, ResearchGap, SimilarPaper, ScoringProvenance
 
 logger = logging.getLogger(__name__)
@@ -76,7 +76,7 @@ async def _llm_analysis(title: str, text: str) -> IdeaAnalysis:
         "in important_keywords. Leave unsupported fields empty.",
         {"document_title": title, "document_text": text},
         IdeaAnalysis,
-        provider="ollama",
+        provider="groq",
         activity="Research idea extraction",
         max_output_tokens=650,
     )
@@ -227,16 +227,24 @@ async def check_research_idea_novelty(title: str, text: str) -> IdeaNoveltyRepor
     analysis = await _llm_analysis(title, text)
     progress("Searching academic indexes for related work")
     candidates, succeeded, failed = await _search(analysis)
-    by_id = {paper["paper_id"]: paper for paper in candidates[:15]}
+    # Keep complete records for reporting and use short references in the model prompt.
+    by_id = {f"P{index}": paper for index, paper in enumerate(candidates[:8], start=1)}
     progress("Assessing novelty and comparing related work")
     context = {
-        "idea": analysis.model_dump(),
+        "idea": {
+            "problem": excerpt(analysis.problem_statement, 350),
+            "methods": excerpt(analysis.proposed_methodology, 350),
+            "objectives": excerpt(" | ".join(analysis.research_objectives), 240),
+            "contributions": excerpt(" | ".join(analysis.potential_contributions), 240),
+            "domain": excerpt(analysis.research_domain, 120),
+            "keywords": excerpt(" | ".join(analysis.important_keywords), 180),
+        },
         "indexes_searched": succeeded,
         "indexes_unavailable": failed,
     }
     sources = [
-        {"paper_id": paper["paper_id"], "title": paper["title"][:200], "abstract": paper["abstract"][:440]}
-        for paper in by_id.values()
+        {"paper_id": paper_id, "title": paper["title"][:200], "abstract": paper["abstract"][:440]}
+        for paper_id, paper in by_id.items()
     ]
     def validate_comparison(result):
         ids = [paper.paper_id for paper in result.papers]
@@ -285,7 +293,7 @@ async def check_research_idea_novelty(title: str, text: str) -> IdeaNoveltyRepor
     papers = [SimilarPaper.model_validate(record) for record in source_records]
 
     if len(text) > 10000:
-        result.assessment.observations.append("The long proposal was assessed using excerpts within the local context budget.")
+        result.assessment.observations.append("The long proposal was assessed using excerpts within the model prompt budget.")
     if succeeded:
         result.assessment.observations.append("Indexes searched: " + ", ".join(succeeded) + ".")
     if failed:

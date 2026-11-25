@@ -2,66 +2,21 @@
 import asyncio
 import logging
 import os
-from time import perf_counter
-
-from pydantic import BaseModel
 
 from .config import settings
-from .llm import complete, disable_gemini_for_review, excerpt, gemini_available
+from .llm import complete, excerpt, preferred_model
+from .observability import current_monitor
+from .guardrails import sandbox_agent_context
 
 os.environ["LITELLM_LOCAL_MODEL_COST_MAP"] = "True"
+os.environ.setdefault("CREWAI_DISABLE_TELEMETRY", "true")
 logger = logging.getLogger(__name__)
 
 
-class SpecialistReviews(BaseModel):
-    novelty: str
-    methodology: str
-    evidence: str
-
-
-async def _review_with_gemini(assignments, roles, paper_context):
-    from crewai import LLM
-    from google.genai.types import HttpOptions, HttpRetryOptions, ThinkingConfig
-
-    options = {}
-    if settings.gemini_model.startswith("gemini-3"):
-        options["thinking_config"] = ThinkingConfig(thinking_level="MINIMAL")
-    llm = LLM(
-        model=f"gemini/{settings.gemini_model}",
-        api_key=settings.google_api_key.strip(),
-        temperature=0.2,
-        max_tokens=1000,
-        use_vertexai=False,
-        client_params={"http_options": HttpOptions(retry_options=HttpRetryOptions(attempts=1))},
-        **options,
-    )
-    # Three independent specialist responses in one request leave room for synthesis.
-    started = perf_counter()
-    raw = await asyncio.wait_for(llm.acall(
-        [
-            {"role": "system", "content": (
-                "Complete all three specialist assignments independently. Use at most 100 words per review. "
-                "Include the requested score and challenge lines. Return each review as plain text "
-                "in its corresponding JSON field: novelty, methodology, or evidence."
-            )},
-            {"role": "user", "content": "\n\n".join([*assignments, paper_context])},
-        ],
-        response_model=SpecialistReviews,
-    ), timeout=10)
-    reviews = raw if isinstance(raw, SpecialistReviews) else SpecialistReviews.model_validate_json(raw)
-    notes = [reviews.novelty.strip(), reviews.methodology.strip(), reviews.evidence.strip()]
-    if not all(notes):
-        raise ValueError("Incomplete Gemini specialist reviews")
-    logger.info("Gemini completed specialist review in %.1fs", perf_counter() - started)
-    return {
-        "raw": "\n\n".join(notes),
-        "mode": "live_llm",
-        "model": settings.gemini_model,
-        "tasks": [
-            {"agent": role, "raw": note, "description": prompt}
-            for role, note, prompt in zip(roles, notes, assignments)
-        ],
-    }
+def record_specialist_output(output):
+    monitor = current_monitor.get()
+    if monitor:
+        monitor.callbacks.on_task_intermediate(output.agent, "specialist_review", output.raw)
 
 
 async def run_crewai_review(title, text, sources):
@@ -81,7 +36,7 @@ async def run_crewai_review(title, text, sources):
             "Keep the review under 250 words. Put the required score and one question for the authors (CHALLENGE: question) on separate lines."
         )
 
-        paper_context = f"Paper Title: {title}\nPaper: {text}\nRetrieved Sources:\n{context}"
+        paper_context = sandbox_agent_context(f"Paper Title: {title}\nPaper: {text}\nRetrieved Sources:\n{context}")
         assignments = [
             (
                 f"{rules}\nAssess novelty and research gaps. Compare the paper against the retrieved literature from arXiv, OpenAlex, and CrossRef.\n"
@@ -100,20 +55,6 @@ async def run_crewai_review(title, text, sources):
             ),
         ]
 
-        if gemini_available():
-            try:
-                return await _review_with_gemini(
-                    assignments,
-                    ("Novelty and Gap Analyst", "Methodology Reviewer", "Dataset and Evidence Reviewer"),
-                    paper_context,
-                )
-            except Exception as exc:
-                if getattr(exc, "code", None) in (400, 401, 403, 404, 429):
-                    disable_gemini_for_review()
-                logger.warning("Gemini specialist review failed (%s). Falling back to Ollama.", type(exc).__name__)
-        else:
-            logger.warning("Gemini unavailable for specialist review. Falling back to Ollama.")
-
         import pathlib
         import tempfile
         try:
@@ -128,18 +69,36 @@ async def run_crewai_review(title, text, sources):
 
         from crewai import Agent, Task, Crew, Process, BaseLLM
 
-        class OllamaSpecialistLLM(BaseLLM):
+        monitor = current_monitor.get()
+        callbacks = monitor.callbacks if monitor else None
+        task_models = {}
+
+        class SpecialistLLM(BaseLLM):
             reviewer: str
 
             def call(self, messages, **kwargs):
                 return asyncio.run(self.acall(messages, **kwargs))
 
             async def acall(self, messages, **kwargs):
+                task = "specialist_review"
+                started = callbacks.on_task_start(self.reviewer, task) if callbacks else None
+                try:
+                    result = await self.review(messages)
+                except Exception as exc:
+                    if callbacks:
+                        callbacks.on_task_error(self.reviewer, task, started, exc)
+                    raise
+                task_models[self.reviewer] = preferred_model()[1]
+                if callbacks:
+                    callbacks.on_task_finish(self.reviewer, task, started, result)
+                return result
+
+            async def review(self, messages):
                 return await complete(
                     "Complete the assigned CrewAI specialist review. Provide your final answer directly. "
                     "Follow the score and challenge label formats in the assignment.",
                     messages,
-                    provider="ollama",
+                    provider="gemini",
                     agentic=True,
                     activity=self.reviewer,
                     max_output_tokens=600,
@@ -149,14 +108,14 @@ async def run_crewai_review(title, text, sources):
                 return False
 
             def get_context_window_size(self):
-                return settings.ollama_context_tokens
+                return 8192
 
         agents = [
             Agent(
                 role="Novelty and Gap Analyst",
                 goal="Compare contribution against multi-source literature and calculate an accurate Novelty Score (0-100)",
                 backstory="Rigorous academic literature reviewer specialized in finding prior art and identifying true research gaps.",
-                llm=OllamaSpecialistLLM(model=settings.ollama_agent_model, reviewer="Novelty and Gap Analyst"),
+                llm=SpecialistLLM(model=settings.groq_specialist_model, reviewer="Novelty and Gap Analyst"),
                 max_iter=2,
                 allow_delegation=False,
             ),
@@ -164,7 +123,7 @@ async def run_crewai_review(title, text, sources):
                 role="Methodology Reviewer",
                 goal="Assess experimental design, baselines, reproducibility, and calculate a Feasibility Score (0-100)",
                 backstory="Senior peer reviewer auditing baselines, data hygiene, hyperparameters, ablations, and implementation feasibility.",
-                llm=OllamaSpecialistLLM(model=settings.ollama_agent_model, reviewer="Methodology Reviewer"),
+                llm=SpecialistLLM(model=settings.groq_specialist_model, reviewer="Methodology Reviewer"),
                 max_iter=2,
                 allow_delegation=False,
             ),
@@ -172,7 +131,7 @@ async def run_crewai_review(title, text, sources):
                 role="Dataset and Evidence Reviewer",
                 goal="Check dataset suitability, statistical rigor, and calculate Evidence Coverage (0-100%)",
                 backstory="Skeptical empirical reviewer verifying claim-evidence alignment and statistical uncertainty.",
-                llm=OllamaSpecialistLLM(model=settings.ollama_agent_model, reviewer="Dataset and Evidence Reviewer"),
+                llm=SpecialistLLM(model=settings.groq_specialist_model, reviewer="Dataset and Evidence Reviewer"),
                 max_iter=2,
                 allow_delegation=False,
             ),
@@ -185,6 +144,7 @@ async def run_crewai_review(title, text, sources):
                     "Structured evaluation with explicit score tag, headline, explanation, evidence status, and recommendations."
                 ),
                 agent=agent,
+                callback=record_specialist_output,
             )
             for prompt, agent in zip(assignments, agents)
         ]
@@ -196,18 +156,24 @@ async def run_crewai_review(title, text, sources):
             verbose=False,
         )
 
-        result = await asyncio.wait_for(crew.kickoff_async(), timeout=settings.ollama_timeout_seconds * 6)
+        result = await asyncio.wait_for(crew.kickoff_async(), timeout=settings.groq_timeout_seconds * 6)
 
         task_list = []
         for t in getattr(result, "tasks_output", []) or []:
+            role = str(getattr(t, "agent", "") or getattr(t, "name", "") or "Specialist")
             task_list.append({
-                "agent": str(getattr(t, "agent", "") or getattr(t, "name", "") or "Specialist"),
+                "agent": role,
+                "model": task_models.get(role, settings.groq_specialist_model),
                 "raw": str(getattr(t, "raw", "") or ""),
                 "description": str(getattr(t, "description", "") or "")
             })
 
-        return {"raw": str(result), "mode": "live_llm", "model": settings.ollama_agent_model, "tasks": task_list}
+        models = ", ".join(sorted(set(task_models.values()))) or settings.groq_specialist_model
+        return {"raw": str(result), "mode": "live_llm", "model": models, "tasks": task_list}
 
     except Exception as exc:
+        monitor = current_monitor.get()
+        if monitor:
+            monitor.log("crewai_specialists", "error", type(exc).__name__)
         logger.warning("CrewAI specialist run unavailable: %s", type(exc).__name__)
         return None

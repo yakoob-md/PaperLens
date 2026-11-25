@@ -1,8 +1,10 @@
 from .llm import complete
 from .schemas import ChatRequest, ChatResponse
+from .guardrails import enforce_no_prompt_override
 
 async def handle_paper_chat(req: ChatRequest) -> ChatResponse:
     """Answer questions comparing the uploaded paper with a fetched research paper."""
+    enforce_no_prompt_override(req.question)
     src = req.selected_source
     
     if src:

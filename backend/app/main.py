@@ -4,11 +4,10 @@ try:
 except Exception:
     pass
 
-import os, sys, tempfile, pathlib
-os.environ["PYTHONHTTPSVERIFY"] = "0"
+import os, tempfile, pathlib
 os.environ["LITELLM_LOCAL_MODEL_COST_MAP"] = "True"
 os.environ["CREWAI_TELEMETRY_OPT_OUT"] = "true"
-os.environ["OTEL_SDK_DISABLED"] = "true"
+os.environ.setdefault("CREWAI_DISABLE_TELEMETRY", "true")
 
 # Prevent CrewAI from attempting to write credentials to forbidden AppData folder on Windows:
 try:
@@ -26,9 +25,10 @@ from pydantic import ValidationError
 import httpx
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Response, Request
 from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from .config import settings
-from .llm import model_session, ModelUnavailable
+from .llm import model_session, ModelUnavailable, GROQ_URL, groq_headers
 from .overview import summarize_paper
 from .progress import progress, with_progress
 from .report_export import router as report_export_router
@@ -42,7 +42,6 @@ from .guardrails import validate_paper_text
 from .pipeline import run_review
 from .chat import handle_paper_chat
 from .mcp_client import call_mcp_tool
-from .a2a import router as a2a_router
 from .idea_checker import check_research_idea_novelty, extract_text_from_file
 from starlette.concurrency import run_in_threadpool
 
@@ -54,7 +53,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"]
 )
-app.include_router(a2a_router)
 app.include_router(report_export_router)
 
 @app.middleware("http")
@@ -73,12 +71,12 @@ def health():
     return {
         "status": "ok",
         "service": "paperlens-api",
-        "mode": "hybrid_llm" if settings.google_api_key.strip() else "local_llm",
-        "active_provider": "ollama",
-        "active_model": settings.ollama_model,
+        "mode": "hybrid_llm" if settings.google_api_key.strip() else "groq",
+        "active_provider": "groq",
+        "active_model": settings.groq_model,
         "gemini_configured": bool(settings.google_api_key.strip()),
         "gemini_model": settings.gemini_model,
-        "frameworks": ["CrewAI", "Ollama"],
+        "frameworks": ["CrewAI", "Google ADK"],
         "protocols": ["Model Context Protocol (JSON-RPC 2.0)", "A2A Protocol (JSON-RPC 2.0)"],
         "guardrail_layers": 4,
     }
@@ -87,23 +85,26 @@ def health():
 @app.get("/api/llm-status")
 async def get_llm_status():
     try:
+        if not settings.groq_api_key.strip():
+            raise ValueError("Groq key missing")
         async with httpx.AsyncClient(timeout=4) as client:
-            response = await client.get(settings.ollama_url.rstrip("/") + "/api/tags")
+            response = await client.get(f"{GROQ_URL}/models", headers=groq_headers())
             response.raise_for_status()
-            installed = [item["name"] for item in response.json().get("models", [])]
+            installed = [item["id"] for item in response.json().get("data", [])]
         reachable = True
     except (httpx.HTTPError, ValueError, KeyError, TypeError):
         installed = []
         reachable = False
     return {
-        "active_provider": "ollama",
-        "active_model": settings.ollama_model,
-        "agent_model": settings.ollama_agent_model,
+        "active_provider": "groq",
+        "active_model": settings.groq_model,
+        "agent_model": settings.groq_specialist_model,
         "gemini_configured": bool(settings.google_api_key.strip()),
         "gemini_model": settings.gemini_model,
+        "groq_configured": bool(settings.groq_api_key.strip()),
         "reachable": reachable,
         "installed_models": installed,
-        "ready": reachable and {settings.ollama_model, settings.ollama_agent_model}.issubset(installed),
+        "ready": reachable and {settings.groq_model, settings.groq_specialist_model}.issubset(installed),
     }
 
 
@@ -199,10 +200,10 @@ async def invoke_mcp_tool(payload: McpInvokeRequest):
     return McpInvokeResponse(invocation=invocation, result=result)
 
 @app.get("/api/evaluation", response_model=EvaluationSummary)
-async def get_evaluation_metrics():
+async def get_evaluation_metrics(request: Request):
     """Run end-to-end performance evaluation, latency, running time, and cost estimates."""
     from evaluation.run_eval import evaluate_all_cases
-    return await evaluate_all_cases()
+    return await with_progress(request, evaluate_all_cases)
 
 # --- Feature: Research Idea Novelty Checker Endpoints ---
 
@@ -252,3 +253,8 @@ async def proxy_pdf(url: str):
         raise HTTPException(502, "The PDF preview is unavailable. Open the original link instead.") from exc
     return Response(data, media_type="application/pdf",
                     headers={"Content-Disposition": 'inline; filename="academic-paper.pdf"'})
+
+
+static_dir = os.environ.get("PAPERLENS_STATIC_DIR")
+if static_dir:
+    app.mount("/", StaticFiles(directory=static_dir, html=True), name="frontend")

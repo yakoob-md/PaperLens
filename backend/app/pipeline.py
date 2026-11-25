@@ -12,10 +12,10 @@ from .schemas import (
     ChallengeQuestion, AgentDebateMessage, GuardrailAudit, McpToolInvocation,
     StateTransition, A2AMessageExchange, ScoringProvenance
 )
-from .observability import RunMonitor
+from .observability import RunMonitor, current_monitor
 from .guardrails import (
-    detect_prompt_injection, audit_layer1_input, audit_layer2_tool_boundary,
-    audit_layer3_a2a_context, audit_layer4_output
+    enforce_review_input, audit_layer1_input, audit_layer2_tool_boundary,
+    audit_layer3_a2a_context, audit_layer4_output, validate_verdict_consistency
 )
 from .mcp_client import call_mcp_tool
 from .crew import run_crewai_review
@@ -128,14 +128,32 @@ def synthesis_excerpt(text: str) -> str:
 
 
 async def run_review(title: str, text: str) -> ReviewReport:
-    with model_session():
-        return await _run_review(title, text)
-
-
-async def _run_review(title: str, text: str) -> ReviewReport:
-    started_all = time.perf_counter()
     monitor = RunMonitor()
+    token = current_monitor.set(monitor)
+    report = None
+    try:
+        with model_session():
+            report = await _run_review(title, text, monitor)
+            return report
+    except Exception as exc:
+        monitor.log("review", "error", type(exc).__name__)
+        logger.warning("Review failed: %s", type(exc).__name__)
+        raise
+    finally:
+        monitor.close("completed" if report else "error", report.review_id if report else None)
+        current_monitor.reset(token)
+
+
+async def _run_review(title: str, text: str, monitor: RunMonitor) -> ReviewReport:
+    started_all = time.perf_counter()
+    enforce_review_input(title, text)
+    input_audits = audit_layer1_input(title, text)
+    for audit in input_audits:
+        if audit.status == "WARNING":
+            monitor.log("guardrails.input", "warning", audit.audit_findings)
+    overview_start = monitor.start("paper_overview")
     overview = await summarize_paper(title, text)
+    monitor.finish("paper_overview", overview_start)
     similarity_model = None
     
     # --- Req 1: Context Sharing & Shared State Dictionary ---
@@ -150,7 +168,7 @@ async def _run_review(title: str, text: str) -> ReviewReport:
     }
     
     state_transitions: list[StateTransition] = []
-    all_guardrail_audits: list[GuardrailAudit] = []
+    all_guardrail_audits: list[GuardrailAudit] = input_audits
     all_mcp_invocations: list[McpToolInvocation] = []
     all_a2a_exchanges: list[A2AMessageExchange] = []
 
@@ -165,12 +183,6 @@ async def _run_review(title: str, text: str) -> ReviewReport:
     # --------------------------------------------------------------------------
     # STEP 1: LAYER 1 GUARDRAILS & STATE INITIALIZATION (Req 1 & 8)
     # --------------------------------------------------------------------------
-    l1_audits = audit_layer1_input(title, text)
-    all_guardrail_audits.extend(l1_audits)
-    
-    has_injection, inj_msg = detect_prompt_injection(text)
-    if has_injection:
-        monitor.log("guardrails", "warning", f"Prompt Injection Guardrail triggered: {inj_msg}")
     monitor.log("orchestrator", "info", "Layer 1 Input Guardrails verified. Initialized shared review state.")
 
     state_transitions.append(StateTransition(
@@ -187,15 +199,19 @@ async def _run_review(title: str, text: str) -> ReviewReport:
     # STEP 2: MCP TOOL 1 - text_statistics (Req 2 & 8)
     # --------------------------------------------------------------------------
     t_stats = monitor.start("mcp.text_statistics")
-    monitor.callbacks.on_task_start("Workflow Orchestrator", "text_statistics", f"paper_text[:80]={text[:80]}")
+    monitor.callbacks.on_task_start("Workflow Orchestrator", "text_statistics", f"{len(text)} characters")
     
     progress("Measuring the structure of the paper")
     stats_raw, inv_stats = await call_mcp_tool("text_statistics", {"paper_text": text}, "Workflow Orchestrator")
     all_mcp_invocations.append(inv_stats)
     state["stats"] = stats_raw if isinstance(stats_raw, dict) else {}
     
-    monitor.finish("mcp.text_statistics", t_stats, inv_stats.response_summary)
-    monitor.callbacks.on_task_finish("Workflow Orchestrator", "text_statistics", t_stats, inv_stats.response_summary)
+    if inv_stats.status == "SUCCESS":
+        monitor.finish("mcp.text_statistics", t_stats, inv_stats.response_summary)
+        monitor.callbacks.on_task_finish("Workflow Orchestrator", "text_statistics", t_stats, inv_stats.response_summary)
+    else:
+        monitor.finish("mcp.text_statistics", t_stats, inv_stats.response_summary, "error")
+        monitor.callbacks.on_task_error("Workflow Orchestrator", "text_statistics", t_stats, ValueError(inv_stats.response_summary))
 
     state_transitions.append(StateTransition(
         step_number=2,
@@ -203,7 +219,7 @@ async def _run_review(title: str, text: str) -> ReviewReport:
         source_agent="Workflow Orchestrator",
         target_agent="Multi-Source Literature Retriever",
         keys_updated=["stats"],
-        intermediate_summary=f"Extracted {state['stats'].get('word_count', 0):,} words and {state['stats'].get('sentence_count', 0)} sentences. Fed stats into literature search.",
+        intermediate_summary=inv_stats.response_summary,
         timestamp=now_ts
     ))
 
@@ -270,7 +286,7 @@ async def _run_review(title: str, text: str) -> ReviewReport:
                 ],
             },
             LiteratureAssessment,
-            provider="ollama",
+            provider="groq",
             activity="Abstract similarity assessment",
             max_output_tokens=750,
             validate=validate_sources,
@@ -285,8 +301,12 @@ async def _run_review(title: str, text: str) -> ReviewReport:
     state["sources"].sort(key=lambda x: x["similarity_percentage"], reverse=True)
     
     lit_msg = f"Retrieved {len(state['sources'])} sources across arXiv ({breakdown.get('arXiv', 0)}), OpenAlex ({breakdown.get('OpenAlex', 0)}), and CrossRef ({breakdown.get('CrossRef', 0)})."
-    monitor.finish("multi_source_literature_retrieval", t_lit, lit_msg)
-    monitor.callbacks.on_task_finish("Multi-Source Literature Retriever", "search_academic_literature", t_lit, lit_msg)
+    if inv_lit.status == "SUCCESS":
+        monitor.finish("multi_source_literature_retrieval", t_lit, lit_msg)
+        monitor.callbacks.on_task_finish("Multi-Source Literature Retriever", "search_academic_literature", t_lit, lit_msg)
+    else:
+        monitor.finish("multi_source_literature_retrieval", t_lit, inv_lit.response_summary, "error")
+        monitor.callbacks.on_task_error("Multi-Source Literature Retriever", "search_academic_literature", t_lit, ValueError(inv_lit.response_summary))
 
     state_transitions.append(StateTransition(
         step_number=3,
@@ -306,11 +326,12 @@ async def _run_review(title: str, text: str) -> ReviewReport:
     
     progress("Reviewing novelty, methods, and evidence")
     crew = await run_crewai_review(title, text, state["sources"])
-    specialist_model = (crew or {}).get("model", settings.ollama_agent_model)
+    specialist_model = (crew or {}).get("model", settings.groq_specialist_model)
     
     source_ids = [s["source_id"] for s in state["sources"]]
     progress("Synthesizing findings and scores")
-    notes = [task["raw"] for task in (crew or {}).get("tasks", [])]
+    specialist_tasks = (crew or {}).get("tasks", [])
+    notes = [task["raw"] for task in specialist_tasks]
     synthesis_data = {
         "title": title[:240],
         "overview": overview.about[:850],
@@ -321,6 +342,7 @@ async def _run_review(title: str, text: str) -> ReviewReport:
             for source in state["sources"][:7]
         ],
         "specialist_notes": [note[:850] for note in notes[:3]],
+        "document_statistics": state["stats"],
     }
     synthesis_recovered = False
     try:
@@ -351,19 +373,30 @@ async def _run_review(title: str, text: str) -> ReviewReport:
 
     if len(text) > 3600:
         analysis.limitations.append("The local synthesis used manuscript excerpts within its context budget.")
+    if not crew:
+        analysis.limitations.append("The specialist crew was unavailable. The report uses synthesis without specialist reviews.")
+    if inv_lit.status != "SUCCESS":
+        analysis.limitations.append("The literature retrieval tool was unavailable.")
 
     findings = {finding.dimension: finding for finding in analysis.findings}
     state["findings"] = [findings[dimension] for dimension in DIMENSIONS]
+    citation_audit = audit_layer3_a2a_context(source_ids, state["findings"])
     for finding in state["findings"]:
-        finding.source_ids = [source_id for source_id in finding.source_ids if source_id in source_ids]
+        valid_ids = [source_id for source_id in finding.source_ids if source_id in source_ids]
+        if len(valid_ids) != len(finding.source_ids):
+            finding.source_ids = valid_ids
+            finding.evidence_status = "unverified"
 
     dyn_nov = analysis.novelty_score
     dyn_feas = analysis.feasibility_score
     dyn_coverage = analysis.evidence_coverage
     mode = "live_llm"
     framework = f"CrewAI ({specialist_model})" if synthesis_recovered else model
-    monitor.finish("crewai_specialists", t_crew, f"Review findings synthesized by {framework}.")
-    monitor.callbacks.on_task_finish("CrewAI Specialists", "run_crewai_review", t_crew, "Model analysis complete")
+    if crew:
+        monitor.finish("crewai_specialists", t_crew, f"Review findings synthesized by {framework}.")
+        monitor.callbacks.on_task_finish("CrewAI Specialists", "run_crewai_review", t_crew, "Model analysis complete")
+    else:
+        monitor.finish("crewai_specialists", t_crew, "Specialist crew unavailable.", "error")
 
     state_transitions.append(StateTransition(
         step_number=4,
@@ -378,10 +411,10 @@ async def _run_review(title: str, text: str) -> ReviewReport:
     # --------------------------------------------------------------------------
     # STEP 5: LAYER 3 GUARDRAILS (A2A Context Sandboxing & Citation Verification)
     # --------------------------------------------------------------------------
-    all_guardrail_audits.append(audit_layer3_a2a_context(source_ids, state["findings"]))
+    all_guardrail_audits.append(citation_audit)
 
     # --------------------------------------------------------------------------
-    # STEP 6: A2A PROTOCOL MESSAGE HANDOFF TO THE LOCAL OLLAMA CRITIC (Req 6 & 7)
+    # STEP 6: A2A PROTOCOL MESSAGE HANDOFF TO THE GOOGLE ADK CRITIC (Req 6 & 7)
     # --------------------------------------------------------------------------
     t_a2a = monitor.start("a2a_adversarial_critique")
     monitor.callbacks.on_task_start("Adversarial Critic", "a2a_adversarial_critique", f"Evaluating {len(state['findings'])} findings")
@@ -391,21 +424,26 @@ async def _run_review(title: str, text: str) -> ReviewReport:
         "paper_title": title,
         "overview": overview.model_dump(),
         "findings": [finding.model_dump() for finding in state["findings"]],
-        "sources": state["sources"][:4],
+        "sources": state["sources"],
     })
     progress("Stress-testing the review findings")
     try:
         critique, a2a_record = await execute_a2a_critique(a2a_payload)
         all_a2a_exchanges.append(a2a_record)
-    except ModelUnavailable:
+    except ModelUnavailable as exc:
         critique, a2a_record = "", None
+        monitor.callbacks.on_task_error("Adversarial Critic", "a2a_adversarial_critique", t_a2a, exc)
         analysis.limitations.append("The independent adversarial critic was unavailable. Specialist findings and scores are available.")
         monitor.log("a2a_adversarial_critique", "warning", "The independent adversarial critic was unavailable.")
 
 
     state["critique"] = critique[:2500]
-    monitor.finish("a2a_adversarial_critique", t_a2a, "Adversarial critique completed." if a2a_record else "Adversarial critique unavailable.")
-    monitor.callbacks.on_task_finish("Adversarial Critic", "a2a_adversarial_critique", t_a2a, "Critique completed" if a2a_record else "Critique unavailable")
+    if a2a_record:
+        monitor.callbacks.on_task_intermediate("Adversarial Critic", "a2a_adversarial_critique", critique)
+        monitor.finish("a2a_adversarial_critique", t_a2a, "Adversarial critique completed.")
+        monitor.callbacks.on_task_finish("Adversarial Critic", "a2a_adversarial_critique", t_a2a, "Critique completed")
+    else:
+        monitor.finish("a2a_adversarial_critique", t_a2a, "Adversarial critique unavailable.", "error")
 
     if a2a_record:
         state_transitions.append(StateTransition(
@@ -421,8 +459,10 @@ async def _run_review(title: str, text: str) -> ReviewReport:
     # --------------------------------------------------------------------------
     # STEP 7: OVERALL RECOMMENDATION CONSENSUS (Req 1, 4)
     # --------------------------------------------------------------------------
-    overall_rec = analysis.overall_recommendation
+    overall_rec, verdict_detail = validate_verdict_consistency(dyn_nov, dyn_feas, dyn_coverage, analysis.overall_recommendation)
     rec_summary = analysis.summary
+    if overall_rec != analysis.overall_recommendation:
+        analysis.limitations.append(verdict_detail)
 
     state["recommendation"] = overall_rec
 
@@ -439,7 +479,7 @@ async def _run_review(title: str, text: str) -> ReviewReport:
     # --------------------------------------------------------------------------
     # STEP 8: LAYER 4 GUARDRAILS (Output Synthesis & Schema Integrity) (Req 3, 8)
     # --------------------------------------------------------------------------
-    l4_audits = audit_layer4_output(dyn_nov, dyn_feas, dyn_coverage, overall_rec)
+    l4_audits = audit_layer4_output(dyn_nov, dyn_feas, dyn_coverage, analysis.overall_recommendation)
     all_guardrail_audits.extend(l4_audits)
 
     # --------------------------------------------------------------------------
@@ -452,11 +492,11 @@ async def _run_review(title: str, text: str) -> ReviewReport:
             phase="Specialist findings",
             sender_name=finding.headline,
             sender_role="Paper reviewer",
-            sender_framework=framework,
+            sender_framework=f"CrewAI ({specialist_tasks[index].get('model', specialist_model)})" if index < len(specialist_tasks) else framework,
             speech=finding.explanation,
             timestamp=now_ts,
         )
-        for finding in state["findings"]
+        for index, finding in enumerate(state["findings"])
     ]
     for message, note in zip(agent_conversation, notes):
         challenge = re.search(r"(?im)^\s*[-*#\s]*CHALLENGE\**\s*:\s*\**(.+)$", note)
@@ -504,7 +544,7 @@ async def _run_review(title: str, text: str) -> ReviewReport:
             agent_id=agent_id,
             name=finding.dimension.replace("_", " ").title(),
             role="Paper reviewer",
-            framework=framework,
+            framework=message.sender_framework,
             status="completed",
             icon=icon,
             action=finding.headline,
@@ -512,7 +552,7 @@ async def _run_review(title: str, text: str) -> ReviewReport:
             output_summary=finding.recommendation,
             metrics={"confidence": finding.confidence} if finding.confidence is not None else {},
         )
-        for finding, (agent_id, icon) in zip(state["findings"], (
+        for finding, message, (agent_id, icon) in zip(state["findings"], agent_conversation, (
             ("novelty_analyst", "microscope"),
             ("methodology_reviewer", "flask"),
             ("dataset_evidence_reviewer", "gauge"),
@@ -533,12 +573,13 @@ async def _run_review(title: str, text: str) -> ReviewReport:
         ))
 
     if state["sources"]:
+        evidence_started = monitor.start("full_text_evidence")
         subject = overview.about + "\n" + "\n".join(overview.key_outcomes) + "\n" + synthesis_excerpt(text)[:900]
         await check_full_text(state["sources"], subject)
+        monitor.finish("full_text_evidence", evidence_started)
     total_duration = round((time.perf_counter() - started_all) * 1000, 2)
     logger.info("[ORCHESTRATOR] Review completed in %.2f ms", total_duration)
     logger.info("[REPORT] Final recommendation: %s", overall_rec)
-    monitor.log("report_validation", "completed", f"Review report validated successfully in {total_duration} ms.")
     
     progress("Assembling the review report")
     scoring_prov = ScoringProvenance(
@@ -570,6 +611,8 @@ async def _run_review(title: str, text: str) -> ReviewReport:
         synthesis_recovered=synthesis_recovered,
         duration_ms=total_duration,
         events=monitor.events,
+        model_usage=monitor.usage,
+        langfuse_trace_id=monitor.trace_id,
         agent_activities=agent_activities,
         scoring_provenance=scoring_prov,
         # 10 Minimum Requirements Artifacts:
@@ -580,4 +623,6 @@ async def _run_review(title: str, text: str) -> ReviewReport:
         state_transitions=state_transitions,
         a2a_exchanges=all_a2a_exchanges
     )
+    monitor.log("report_validation", "completed", f"Review report validated successfully in {total_duration} ms.")
+    report.events = monitor.events
     return report

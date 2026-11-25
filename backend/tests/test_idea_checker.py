@@ -113,7 +113,7 @@ class PipelineTests(IsolatedAsyncioTestCase):
                 explanation="Overlap in methodology", differentiation_strategy="Compare evaluation protocols.",
             )
         match = idea_checker.IdeaPaperAssessment(
-            paper_id="related", similarity_percentage=73, relevance_category="high",
+            paper_id="P1", similarity_percentage=73, relevance_category="high",
             overlap_summary="Both study citation grounding.",
             highlights=[highlight(RELATED["abstract"]), highlight("Invented quote")],
         )

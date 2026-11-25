@@ -2,18 +2,18 @@
 
 This document maps all 10 evaluation criteria to exact files, functions, and architecture components for professors and reviewers.
 
-| # | Evaluation Criterion | Exact Code Implementation | Presentation Explanation & Demonstration |
+| # | Requirement | Implementation | Where to verify |
 |---|---|---|---|
-| **1** | **Context Sharing & State Updates** | `backend/app/pipeline.py` (`state` dictionary), `StateTransition` model in `app/schemas.py` | State flows through 6 discrete steps: `title + text` → `stats` → `sources` → `findings` → `critique` → `recommendation`. Demonstrated in the **"Context & State Updates"** UI tab. |
-| **2** | **Tool Integration using MCP (2+ tools)** | `backend/mcp_server.py` (`FastMCP("paperlens-research-tools")`), `backend/app/mcp_client.py` | 5 tools registered over Model Context Protocol (JSON-RPC 2.0): `text_statistics`, `search_academic_literature`, `search_arxiv`, `search_openalex`, `search_crossref`. Demonstrated live in the **"MCP Tools & Protocol"** tab and interactive console. |
-| **3** | **Structured Output using Pydantic** | `backend/app/schemas.py` (`ReviewReport`, `Finding`, `ChallengeQuestion`, `McpToolInvocation`) | Generates typed, validated JSON and Markdown Table formats with mathematical constraints. Demonstrated with the **"Export Markdown"**, **"Export JSON"**, and **"Table View"** toggles. |
-| **4** | **Agentic Design Patterns** | `backend/app/pipeline.py` & `backend/app/crew.py` | Implements 4 patterns: (a) Hierarchical Orchestrator-Worker, (b) Role-based Specialist Crew, (c) Evaluator-Optimizer Adversarial Critique, (d) Multi-round Conference Debate. |
-| **5** | **Task Monitoring & Logging using Callbacks** | `backend/app/observability.py` (`AgentCallbackHandler`, `RunMonitor`), `backend/app/crew.py` (`task_callback`) | `task_callback` captures intermediate outputs, execution flows, and errors for transparency. All logged into `report.events` and Langfuse. |
-| **6** | **Agent-to-Agent (A2A) Protocol Communication** | `backend/app/a2a.py` (`execute_a2a_critique()`, `/.well-known/agent-card.json`, `/a2a`) | Passes structured findings from CrewAI specialist agents over JSON-RPC 2.0 message handoff to the Google ADK Adversarial Critic agent. Demonstrated in the **"A2A Inter-Agent Protocol"** tab. |
-| **7** | **CrewAI + Google ADK Exclusivity** | `backend/app/crew.py` (CrewAI specialists) & `backend/app/adk_agent.py` (Google ADK critic) | Only CrewAI and Google ADK are used as the agentic frameworks across the entire system. Zero unauthorized frameworks. |
-| **8** | **Securing the Agentic System (Guardrails & Callbacks)** | `backend/app/guardrails.py` (4 Defense-in-Depth Layers) | • Layer 1: Prompt injection scanner, toxic language screener, size limits.<br>• Layer 2: Tool return type-checking callbacks & query sanitizer.<br>• Layer 3: Context sandboxing (`<UNTRUSTED_PAPER_CONTENT>`) & citation grounding.<br>• Layer 4: Mathematical score clamping & verdict consistency. Demonstrated in the **"Guardrails & Security"** tab. |
-| **9** | **Observability & Tracing (Langfuse Integration)** | `backend/app/observability.py` (`RunMonitor`, `optional_langfuse()`) | Full provenance, span durations, token estimations, and metadata exported to Langfuse and returned in `report.events`. |
-| **10** | **End-to-End Evaluation, Running Time & Cost Estimates** | `backend/evaluation/run_eval.py` & `/api/evaluation` | Evaluates diverse benchmark cases (`sample_cases.jsonl`), calculating latency in ms, running time in seconds, token counts, and cost in USD ($0.59/1M in, $0.79/1M out). Demonstrated live in the **"Evaluation & Cost"** tab. |
+| 1 | Shared context | Review state passes literature to CrewAI, specialist notes to synthesis, and findings to the critic. | Context & State Updates |
+| 2 | MCP tools | MCP SDK initializes a stdio session with FastMCP and invokes both text statistics and literature search. | MCP Tools & Protocol |
+| 3 | Pydantic output | FastAPI returns a validated `ReviewReport` from both review endpoints. | JSON export |
+| 4 | Agentic design patterns | The orchestrator delegates to a sequential specialist crew and an independent critic. | Agentic Activity |
+| 5 | Callbacks | CrewAI task and ADK model callbacks capture intermediate outputs. Tool and model failures are recorded. | Critique & logs |
+| 6 | A2A | The A2A SDK resolves the agent card and sends `message/send` to the ADK critic. | A2A Inter-Agent Protocol |
+| 7 | CrewAI and ADK | CrewAI runs the three specialists and Google ADK runs the critic. Gemini and Groq provide inference. | Agentic Activity and A2A |
+| 8 | Guardrails | Input checks run before inference. MCP payloads are validated before use. Findings are grounded against retrieved IDs and final scores are schema-validated. | Guardrails & Security |
+| 9 | Observability | Local trace events, model usage and provenance are included in each report. Optional Langfuse export sends spans, statuses, and generation usage. | Critique & logs and [Langfuse setup](../README.md#langfuse-tracing) |
+| 10 | Evaluation | The API benchmark evaluates each case, reports measured latency and estimated provider charges, and checks required stages. | Evaluation & Cost and `backend/evaluation/run_eval.py` |
 
 ---
 

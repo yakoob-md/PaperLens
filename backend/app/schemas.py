@@ -3,7 +3,7 @@ from pydantic import BaseModel, Field, field_validator
 
 class PaperInput(BaseModel):
     title: str = Field(default="Untitled research paper", max_length=240)
-    text: str = Field(min_length=80)
+    text: str = Field(min_length=80, max_length=500000)
     @field_validator("text")
     @classmethod
     def trim_text(cls, value):
@@ -87,7 +87,7 @@ class StateTransition(BaseModel):
 class A2AMessageExchange(BaseModel):
     protocol: str = "A2A Protocol (JSON-RPC 2.0)"
     sender_framework: str = "CrewAI Specialist Reviewer"
-    receiver_framework: str = "Ollama Adversarial Critic"
+    receiver_framework: str = "Groq Adversarial Critic"
     handshake_card: str = "/.well-known/agent-card.json"
     method: str = "message/send"
     request_payload: dict[str, Any] = Field(default_factory=dict)
@@ -155,6 +155,16 @@ class ScoringProvenance(BaseModel):
     is_pure_process_driven: bool = True
     audit_trail: list[str] = Field(default_factory=list)
 
+class ModelUsage(BaseModel):
+    provider: str
+    model: str
+    activity: str
+    input_tokens: int
+    output_tokens: int
+    estimated: bool
+    estimated_cost_usd: float | None
+
+
 # --- Req 3: Pydantic Structured Output ---
 class ReviewReport(BaseModel):
     review_id: str
@@ -173,6 +183,8 @@ class ReviewReport(BaseModel):
     execution_mode: Literal["live_llm", "demo_fallback"]
     duration_ms: float
     events: list[PipelineEvent]
+    model_usage: list[ModelUsage] = Field(default_factory=list)
+    langfuse_trace_id: str | None = None
     agent_activities: list[AgentActivity] = Field(default_factory=list)
     scoring_provenance: ScoringProvenance = Field(default_factory=ScoringProvenance)
     
@@ -220,16 +232,23 @@ class EvaluationCaseResult(BaseModel):
     sources_retrieved: int = 0
     findings_count: int = 0
     estimated_tokens: int = 0
-    estimated_cost_usd: float = 0.0
+    estimated_cost_usd: float | None = None
+    model_calls: int = 0
+    estimated_token_calls: int = 0
+    passed: bool = False
+    issues: list[str] = Field(default_factory=list)
+    review_id: str | None = None
+    langfuse_trace_id: str | None = None
     guardrails_passed: int = 0
     mode: str = "demo_fallback"
 
 class EvaluationSummary(BaseModel):
     total_cases_evaluated: int
+    passed_cases: int = 0
     average_latency_ms: float
     average_running_time_s: float
-    total_estimated_cost_usd: float
-    average_cost_per_review_usd: float
+    total_estimated_cost_usd: float | None
+    average_cost_per_review_usd: float | None
     results: list[EvaluationCaseResult] = Field(default_factory=list)
 
 # --- Feature: Research Idea Novelty Checker Schemas ---

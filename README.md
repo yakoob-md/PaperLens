@@ -2,7 +2,7 @@
 
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.115+-009688.svg?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com)
 [![CrewAI](https://img.shields.io/badge/CrewAI-Multi--Agent-orange.svg)](https://crewai.com)
-[![Ollama](https://img.shields.io/badge/Ollama-Local%20models-blue.svg)](https://ollama.com)
+[![Groq](https://img.shields.io/badge/Groq-Cloud%20inference-blue.svg)](https://console.groq.com/docs/models)
 [![Model Context Protocol](https://img.shields.io/badge/MCP-JSON--RPC%202.0-purple.svg)](https://modelcontextprotocol.io)
 [![A2A Protocol](https://img.shields.io/badge/A2A%20Protocol-Interoperable-green.svg)](https://github.com/AnanyaPandey0805/PaperLens)
 [![Pydantic v2](https://img.shields.io/badge/Pydantic-v2-red.svg)](https://docs.pydantic.dev/)
@@ -11,9 +11,9 @@
 
 ---
 
-## Local models and full-text evidence
+## Model providers and full-text evidence
 
-Start Ollama before the backend. Both model settings default to `llama3.1:8b`. For a lighter option, run `ollama pull qwen3.5:4b` and set `OLLAMA_MODEL` and `OLLAMA_AGENT_MODEL` in `backend/.env` to `qwen3.5:4b`. Using one model for both roles avoids reloading weights between stages. `GET /api/llm-status` checks whether Ollama is reachable and both configured models are installed. A deployed backend needs an Ollama service reachable through `OLLAMA_URL`.
+Set `GROQ_API_KEY` and `GOOGLE_API_KEY` in `backend/.env` or in your deployment's backend secrets. Groq defaults to `openai/gpt-oss-20b`. Set `GROQ_MODEL` to override it and `GROQ_AGENT_MODEL` to choose a separate agent model. `GET /api/llm-status` checks Groq credentials and model availability. Groq requests cap prompt size and completion tokens. Rate-limit retries respect Groq's retry header up to the configured wait limit.
 
 PaperLens ranks related work by title and abstract and checks readable PDFs for the top three matches from arXiv, ACL Anthology, and OpenReview. The overlap viewer and report downloads display verified quotations and PDF page numbers. Sources that lack verified text evidence keep their abstract-only label and original similarity score. Long model inputs are capped using excerpts.
 
@@ -22,22 +22,22 @@ PaperLens ranks related work by title and abstract and checks readable PDFs for 
 1. **Paper Overview and Specialist Review**:
    - Upload a text-based PDF to see a plain-language overview and the outcomes the authors reported. Start the detailed review when ready.
    - The configured model generates analysis, scores, findings, and recommendations using the manuscript and retrieved literature.
-   - Ollama handles overview, abstract similarity, PDF evidence verification, idea extraction, and adversarial critique.
-   - Set `GOOGLE_API_KEY` in `backend/.env` to enable Gemini for specialist review, report synthesis, idea novelty assessment, and paper chat. `GEMINI_MODEL` defaults to `gemini-3.5-flash-lite`. The three specialist assessments share one Gemini request, and synthesis uses one more. Missing credentials or a failed cloud request trigger Ollama fallback.
+   - Groq handles overview, abstract similarity, PDF evidence verification, idea extraction, and adversarial critique.
+   - Set `GOOGLE_API_KEY` in `backend/.env` to enable Gemini for specialist review, report synthesis, idea novelty assessment, and paper chat. `GEMINI_MODEL` defaults to `gemini-3.5-flash-lite`. The three CrewAI specialists each make a model call, and synthesis makes a separate call. Missing credentials or a failed cloud request trigger Groq fallback.
    - **CrewAI Specialist Agents**: Novelty & Gap Analyst, Methodology & Reproducibility Auditor, Dataset & Evidence Reviewer.
-   - **Ollama Adversarial Critic**: Independent local reviewer that challenges unsupported findings.
-   - **Multi-Round Debate with Challenge Questions**: 4 debate rounds and targeted, urgent challenge questions exposed live in the UI.
+   - **Google ADK Adversarial Critic**: Independent local reviewer that challenges unsupported findings.
+   - **Review Discussion**: Specialist findings and the independent critique produce targeted questions for the authors.
 
 2. **Model Context Protocol (MCP) Integration**:
    - Built on standard FastMCP with 5 external academic tools (`text_statistics`, `search_academic_literature`, `search_arxiv`, `search_openalex`, `search_crossref`).
-   - Full JSON-RPC 2.0 telemetry with an interactive live tool testing console directly inside the dashboard.
+   - The review invokes text statistics and literature search through an SDK client session over stdio. The dashboard shows the tool name, negotiated protocol version, result, and duration.
 
 3. **Agent-to-Agent (A2A) Protocol Boundary**:
-   - Official agent discovery card at `/.well-known/agent-card.json`.
-   - Interoperable JSON-RPC 2.0 message handoff between CrewAI specialists and the Ollama Adversarial Critic.
+   - The A2A server provides agent-card discovery at `/.well-known/agent-card.json` and JSON-RPC at `/a2a`.
+   - Interoperable JSON-RPC 2.0 message handoff between the review orchestrator and the Google ADK critic, using findings from CrewAI specialists.
 
 4. **Multi-Layer Defense-in-Depth Guardrails**:
-   - **Layer 1 (Input)**: Prompt injection scanner (8 signatures) + toxic language filter.
+   - **Layer 1 (Input)**: Rejects recognized prompt override directives before inference. Flags potentially abusive language for review.
    - **Layer 2 (Tools)**: MCP query sanitization + tool return type-checking callbacks.
    - **Layer 3 (A2A)**: Context sandboxing via `<UNTRUSTED_PAPER_CONTENT>` tags + citation grounding verification.
    - **Layer 4 (Output)**: Score bounds validation (0–100) + Pydantic schema validation.
@@ -46,11 +46,11 @@ PaperLens ranks related work by title and abstract and checks readable PDFs for 
    - Centralized `state` dictionary feeding intermediate outputs from one agent to the next across 6 distinct pipeline transitions.
 
 6. **Task Monitoring, Callbacks & Observability**:
-   - `AgentCallbackHandler` and `task_callback` for intermediate task tracking.
+   - CrewAI task callbacks and ADK model callbacks capture intermediate outputs. Model and tool failures are logged.
    - `RunMonitor` with native Langfuse tracing and execution span timing.
 
 7. **End-to-End Evaluation & Cost Estimation**:
-   - Benchmark evaluation across scientific papers with latency (ms), running time (s), estimated token consumption, and local model API cost.
+   - Benchmark evaluation across scientific papers with latency (ms), running time (s), provider-reported token usage where available, and estimated model API charges.
 
 8. **Research Idea Novelty Checker ("Check Research Idea")**:
    - Allows researchers to submit an idea via direct text input or document upload (**PDF** and **DOCX** supported).
@@ -60,17 +60,17 @@ PaperLens ranks related work by title and abstract and checks readable PDFs for 
 
 ---
 
-## 📋 Evaluation Requirements Mapping (10/10)
+## 📋 Evaluation Requirements Mapping
 
 | Requirement | Implementation & Code Location | Where in UI |
 |---|---|---|
 | **1. Context Sharing & State Updates** | `backend/app/pipeline.py` (`state` dictionary & `StateTransition`) | Tab: **Context & State Updates** |
 | **2. Tool Integration using MCP** | `backend/mcp_server.py`, `backend/app/mcp_client.py` | Tab: **MCP Tools & Protocol** |
 | **3. Structured Output (Pydantic)** | `backend/app/schemas.py:ReviewReport` | **Table View**, **Export Markdown**, **Export JSON** |
-| **4. Agentic Design Patterns** | Hierarchical Orchestration, Specialist Crew, Evaluator-Optimizer Critique | Tab: **Agentic Activity** |
+| **4. Agentic Design Patterns** | Orchestrator?worker review, sequential specialists, independent critic | Tab: **Agentic Activity** |
 | **5. Task Monitoring & Callbacks** | `backend/app/observability.py:AgentCallbackHandler`, `backend/app/crew.py` | Tab: **Critique & logs**, Left Event Stream |
 | **6. A2A Protocol Communication** | `backend/app/a2a.py` (`/.well-known/agent-card.json`, `/a2a`) | Tab: **A2A Inter-Agent Protocol** |
-| **7. Local specialist and critic agents** | `backend/app/crew.py` (CrewAI) & `backend/app/a2a.py` (Ollama critic) | Agent badges on each debate turn |
+| **7. CrewAI and Google ADK** | `backend/app/crew.py` (CrewAI) & `backend/app/a2a.py` (ADK critic using Groq) | Agent badges on each debate turn |
 | **8. Secure Agentic System (Guardrails)** | `backend/app/guardrails.py` (4 Defense Layers) | Tab: **Guardrails & Security** |
 | **9. Observability & Tracing** | `backend/app/observability.py:RunMonitor` (Langfuse + Spans) | Traced in `ReviewReport.events` |
 | **10. Performance, Cost & Latency Eval** | `backend/evaluation/run_eval.py` & `sample_cases.jsonl` | Tab: **Evaluation & Cost** |
@@ -104,7 +104,6 @@ copy .env.example .env
 uvicorn app.main:app --port 8000 --timeout-graceful-shutdown 8
 ```
 - API Health Check: [http://localhost:8000/health](http://localhost:8000/health)
-- A2A Agent Card: [http://localhost:8000/.well-known/agent-card.json](http://localhost:8000/.well-known/agent-card.json)
 - Interactive Swagger Docs: [http://localhost:8000/docs](http://localhost:8000/docs)
 
 ### 2. Frontend Setup & Startup
@@ -130,13 +129,40 @@ cd backend
 python -u evaluation/run_eval.py
 ```
 
-### Benchmark Results Overview
-- **Cases Evaluated**: 4 scientific benchmarks (`sample_cases.jsonl`)
-- **Average Running Time**: ~2.5s – 11.8s per paper review
-- **Average Cost per Review**: ~$0.0018 USD
-- **Guardrail Pass Rate**: 100% across all 4 layers
+The suite submits four papers to the normal review API and reports measured wall time, pass/fail reasons, model usage, and estimated provider charges. Run one case with `python -u evaluation/run_eval.py --case case-1`. The CLI exits with a failure status if any case fails its checks.
 
----
+Groq GPT-OSS 20B estimates use $0.075 per million input tokens and $0.30 per million output tokens. Override them with `GROQ_INPUT_USD_PER_MILLION` and `GROQ_OUTPUT_USD_PER_MILLION`. [Groq pricing](https://console.groq.com/docs/model/openai/gpt-oss-20b) Gemini 3.5 Flash-Lite uses standard paid-tier estimates of $0.30 per million input tokens and $2.50 per million output tokens, including thinking tokens. Override the rates for your billing tier or model with `GEMINI_INPUT_USD_PER_MILLION` and `GEMINI_OUTPUT_USD_PER_MILLION`. [Gemini API pricing](https://ai.google.dev/gemini-api/docs/pricing/)
+
+## Langfuse tracing
+
+Create API keys in your Langfuse project's settings and add these values to `backend/.env`. Use the base URL matching your project's region.
+
+```dotenv
+LANGFUSE_PUBLIC_KEY=pk-lf-...
+LANGFUSE_SECRET_KEY=sk-lf-...
+LANGFUSE_BASE_URL=https://cloud.langfuse.com
+```
+
+Restart the backend and submit a sample paper. In the report, open **Critique & logs** and copy the **Langfuse trace ID**. In your Langfuse project's **Traces** view, find `paperlens_review` and match the ID. Open the trace to show stage durations, callback statuses, and model usage. The SDK batches exports, and the CLI benchmark flushes them before exit. The app's trace export sends stage names, status, timing, and model usage metadata. [Langfuse setup](https://langfuse.com/docs/observability/get-started)
+
+## Deploy on Render
+
+Create a Blueprint from the GitHub branch containing `render.yaml`. The Blueprint defines one free Docker web service. It builds the React app and serves it from FastAPI, so the website and API share the same HTTPS URL.
+
+Enter `GROQ_API_KEY`, `GOOGLE_API_KEY`, `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY`, and the project's regional `LANGFUSE_BASE_URL` in Render's environment settings. For an existing Blueprint, add new secrets directly to the service. Once Render reports the service is live, open its URL, check `/api/llm-status`, and submit a sample review. Match the trace ID in the report to your Langfuse dashboard. [Render Blueprints](https://render.com/docs/blueprint-spec)
+
+The free service can sleep between demos. Model API usage is billed or limited separately according to your provider plans. [Render free hosting](https://render.com/docs/free)
+
+## A2A critic transport
+
+The default review uses the A2A SDK to discover and call the local ADK server through an in-process ASGI HTTP transport. For a separate local service, launch it from `backend` with these PowerShell commands.
+
+```powershell
+$env:A2A_PUBLIC_URL = "http://127.0.0.1:8001"
+uvicorn app.a2a:asgi_critic --host 127.0.0.1 --port 8001
+```
+
+Set `A2A_CRITIC_URL=http://127.0.0.1:8001` in the review backend's environment to use that service. Leave it empty for the single-process setup.
 
 ## 📂 Project Directory Structure
 
@@ -151,7 +177,7 @@ PaperLens/
 │   │   ├── mcp_client.py        # FastMCP JSON-RPC 2.0 client session & telemetry
 │   │   ├── a2a.py               # A2A protocol endpoint and message handoff
 │   │   ├── crew.py              # CrewAI specialist reviewers with task callbacks
-│   │   ├── llm.py               # Gemini and Ollama structured generation
+│   │   ├── llm.py               # Gemini and Groq structured generation
 │   │   ├── observability.py     # RunMonitor, Langfuse integration, callbacks
 │   │   ├── chat.py              # Interactive academic copilot
 │   │   └── config.py            # Environment settings and validator

@@ -5,30 +5,18 @@ with standard MCP JSON-RPC 2.0 envelopes and complete protocol telemetry.
 """
 
 import asyncio, json, time, uuid, datetime, sys
-from pathlib import Path
 from typing import Any
-from .config import settings
+from mcp import ClientSession, StdioServerParameters
+from mcp.client.stdio import stdio_client
+from .config import BACKEND_DIR, settings
 from .schemas import McpToolInvocation
-from .guardrails import validate_mcp_query, safe_external_text
+from .guardrails import validate_mcp_query, validate_tool_return_types
 
 _MCP_TELEMETRY_LOG: list[McpToolInvocation] = []
 
 def get_recent_mcp_invocations() -> list[McpToolInvocation]:
     """Return historical record of MCP tool invocations."""
     return list(_MCP_TELEMETRY_LOG)
-
-def _get_mcp_tools():
-    backend_dir = str(Path(__file__).resolve().parents[1])
-    if backend_dir not in sys.path:
-        sys.path.insert(0, backend_dir)
-    import mcp_server
-    return {
-        "text_statistics": mcp_server.text_statistics,
-        "search_arxiv": mcp_server.search_arxiv,
-        "search_openalex": mcp_server.search_openalex,
-        "search_crossref": mcp_server.search_crossref,
-        "search_academic_literature": mcp_server.search_academic_literature,
-    }
 
 async def call_mcp_tool(
     name: str,
@@ -41,59 +29,61 @@ async def call_mcp_tool(
     
     # Layer 2 Guardrail: Sanitize arguments
     sanitized_args = dict(arguments)
-    if "query" in sanitized_args:
-        clean_q, b_res, _ = validate_mcp_query(str(sanitized_args["query"]), int(sanitized_args.get("max_results", 8)))
-        sanitized_args["query"] = clean_q
-        sanitized_args["max_results"] = b_res
-
-    # Build MCP JSON-RPC 2.0 Request Payload
-    request_jsonrpc = {
-        "jsonrpc": "2.0",
-        "id": req_id,
-        "method": "tools/call",
-        "params": {
-            "name": name,
-            "arguments": sanitized_args
-        }
-    }
 
     raw_result = None
     status = "SUCCESS"
-    err_msg = ""
+    response_payload = {}
+    protocol_version = None
 
     # Call the tool from mcp_server
     try:
-        tool_map = _get_mcp_tools()
-        if name in tool_map:
-            fn = tool_map[name]
-            raw_result = await asyncio.to_thread(fn, **sanitized_args)
-        else:
-            status = "FAILED"
-            raw_result = {"error": f"Unknown tool: '{name}'"}
+        if not settings.mcp_enabled:
+            raise ValueError("MCP is disabled")
+        if name == "text_statistics" and len(sanitized_args.get("paper_text", "")) > 500000:
+            raise ValueError("Statistics input exceeds 500,000 characters")
+        if "query" in sanitized_args:
+            clean_q, limit, _ = validate_mcp_query(str(sanitized_args["query"]), sanitized_args.get("max_results", 8))
+            sanitized_args.update(query=clean_q, max_results=limit)
+        server = StdioServerParameters(command=sys.executable, args=[str(BACKEND_DIR / "mcp_server.py")])
+        async with asyncio.timeout(90):
+            async with stdio_client(server) as (reader, writer):
+                async with ClientSession(reader, writer) as session:
+                    initialized = await session.initialize()
+                    protocol_version = initialized.protocolVersion
+                    result = await session.call_tool(name, sanitized_args)
+        response_payload = result.model_dump(mode="json", by_alias=True, exclude_none=True)
+        if result.isError:
+            raise ValueError("MCP server returned a tool error")
+        raw_result = result.structuredContent
+        if raw_result is None and result.content and result.content[0].type == "text":
+            raw_result = json.loads(result.content[0].text)
+        valid, message = validate_tool_return_types(name, raw_result)
+        if not valid:
+            raise ValueError(message)
     except Exception as exc:
         status = "FAILED"
-        err_msg = f"{type(exc).__name__}: {str(exc)}"
-        raw_result = {"error": err_msg}
+        raw_result = {"error": f"{type(exc).__name__}: {exc}"}
 
     duration_ms = round((time.perf_counter() - t0) * 1000, 2)
 
-    # Build MCP JSON-RPC 2.0 Response Payload
+    # The report uses its own correlation ID for the SDK request and typed result.
+    audit_arguments = dict(sanitized_args)
+    if isinstance(audit_arguments.get("paper_text"), str):
+        audit_arguments["paper_text"] = f"[{len(audit_arguments['paper_text'])} characters]"
+    request_jsonrpc = {
+        "jsonrpc": "2.0", "id": req_id, "method": "tools/call",
+        "params": {"name": name, "arguments": audit_arguments},
+    }
     response_jsonrpc = {
         "jsonrpc": "2.0",
         "id": req_id,
-        "result": {
-            "content": [
-                {
-                    "type": "text",
-                    "text": safe_external_text(json.dumps(raw_result))
-                }
-            ],
-            "isError": status == "FAILED"
-        }
+        "result": response_payload or {"isError": True}
     }
 
     # Generate human-readable summary
-    if name == "text_statistics":
+    if status == "FAILED":
+        summary = raw_result["error"]
+    elif name == "text_statistics":
         wc = (raw_result or {}).get("word_count", 0)
         sc = (raw_result or {}).get("sentence_count", 0)
         summary = f"Parsed paper structure: {wc:,} words, {sc:,} sentences."
@@ -110,7 +100,7 @@ async def call_mcp_tool(
         agent_name=calling_agent,
         tool_name=name,
         server_name="paperlens-research-tools",
-        protocol="Model Context Protocol (JSON-RPC 2.0)",
+        protocol=f"MCP {protocol_version}" if protocol_version else "Model Context Protocol (JSON-RPC 2.0)",
         transport="stdio / FastMCP Process",
         request_jsonrpc=request_jsonrpc,
         response_summary=summary,
@@ -120,4 +110,5 @@ async def call_mcp_tool(
     )
 
     _MCP_TELEMETRY_LOG.append(invocation)
+    del _MCP_TELEMETRY_LOG[:-50]
     return raw_result, invocation

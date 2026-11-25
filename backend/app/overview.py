@@ -3,6 +3,7 @@ import re
 from .progress import progress
 from .llm import complete, excerpt
 from .schemas import PaperOverview
+from .guardrails import enforce_review_input
 
 
 def _abstract(text: str) -> str:
@@ -18,6 +19,7 @@ def _abstract(text: str) -> str:
 
 
 async def summarize_paper(title: str, text: str) -> PaperOverview:
+    enforce_review_input(title, text)
     progress("Writing the paper overview and identifying key outcomes")
     abstract = _abstract(text)
     opening = text[:3500]
@@ -34,7 +36,7 @@ async def summarize_paper(title: str, text: str) -> PaperOverview:
         "there are no identifiable results in the supplied excerpts. Supply one short literature search query.",
         {"title": title, "opening_or_abstract": abstract or opening, "body_excerpts": excerpt(text[3500:], 2000)},
         PaperOverview,
-        provider="ollama",
+        provider="groq",
         max_output_tokens=650,
         activity="Paper overview",
     )

@@ -156,7 +156,7 @@ async def check_full_text(sources: list[dict], subject: str) -> None:
                 "explaining the comparison. Use an empty list if none supports a comparison.",
                 {"subject": subject[:2200], "paper_title": source["title"], "passages": passages},
                 _EvidenceResult,
-                provider="ollama",
+                provider="groq",
                 activity="PDF evidence verification",
                 max_output_tokens=850,
             )

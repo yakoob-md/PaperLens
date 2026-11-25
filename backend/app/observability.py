@@ -1,15 +1,21 @@
 """Observability, Tracing, Task Monitoring, and Callbacks.
 
 Provides full provenance, execution flow monitoring, and callback hooks for
-CrewAI, Ollama, and MCP tools, with optional Langfuse tracing integration.
+CrewAI, Groq, and MCP tools, with optional Langfuse tracing integration.
 """
 
 from datetime import datetime, timezone
 from time import perf_counter
-from typing import Any, Callable
-from .schemas import PipelineEvent
+from contextvars import ContextVar
+from functools import lru_cache
+import logging
+from .schemas import ModelUsage, PipelineEvent
 from .config import settings
 
+logger = logging.getLogger(__name__)
+current_monitor: ContextVar["RunMonitor | None"] = ContextVar("review_monitor", default=None)
+
+@lru_cache(maxsize=1)
 def optional_langfuse():
     """Initialize Langfuse client if API keys are configured."""
     if not (settings.langfuse_public_key and settings.langfuse_secret_key):
@@ -19,9 +25,10 @@ def optional_langfuse():
         return Langfuse(
             public_key=settings.langfuse_public_key,
             secret_key=settings.langfuse_secret_key,
-            host=settings.langfuse_host
+            base_url=settings.langfuse_base_url or settings.langfuse_host,
         )
     except Exception:
+        logger.exception("Could not initialize Langfuse")
         return None
 
 class AgentCallbackHandler:
@@ -29,7 +36,6 @@ class AgentCallbackHandler:
     
     def __init__(self, monitor: "RunMonitor"):
         self.monitor = monitor
-        self.callback_logs: list[dict[str, Any]] = []
 
     def on_task_start(self, agent_name: str, task_name: str, inputs_summary: str = ""):
         self.monitor.log(
@@ -40,15 +46,8 @@ class AgentCallbackHandler:
         return perf_counter()
 
     def on_task_intermediate(self, agent_name: str, task_name: str, intermediate_preview: str):
-        record = {
-            "agent": agent_name,
-            "task": task_name,
-            "intermediate_preview": intermediate_preview[:200],
-            "timestamp": datetime.now(timezone.utc).isoformat()
-        }
-        self.callback_logs.append(record)
         self.monitor.log(
-            stage=f"callback.{agent_name}",
+            stage=f"callback.{agent_name}.{task_name}",
             status="info",
             message=f"Intermediate execution flow captured: {intermediate_preview[:150]}"
         )
@@ -78,18 +77,23 @@ class RunMonitor:
     
     def __init__(self):
         self.events: list[PipelineEvent] = []
+        self.usage: list[ModelUsage] = []
         self.langfuse = optional_langfuse()
         self.trace = None
+        self.trace_id = None
+        self.spans = {}
         self.callbacks = AgentCallbackHandler(self)
         
         if self.langfuse:
             try:
-                self.trace = self.langfuse.trace(
+                self.trace = self.langfuse.start_observation(
                     name="paperlens_review",
-                    metadata={"frameworks": "CrewAI+ADK", "protocol": "A2A+MCP"}
+                    as_type="span",
                 )
             except Exception:
-                self.trace = None
+                logger.exception("Could not start Langfuse review trace")
+            else:
+                self.trace_id = self.trace.trace_id
 
     def log(self, stage: str, status: str, message: str, duration_ms: float | None = None):
         event = PipelineEvent(
@@ -103,26 +107,71 @@ class RunMonitor:
         
         if self.trace:
             try:
-                self.trace.event(
+                self.trace.start_observation(
                     name=stage,
-                    metadata={"status": status, "message": message, "duration_ms": duration_ms}
+                    as_type="event",
+                    metadata={"status": status, "duration_ms": duration_ms},
+                    level="ERROR" if status == "error" else "DEFAULT",
                 )
             except Exception:
-                pass
+                logger.exception("Could not record Langfuse event")
 
     def start(self, stage: str) -> float:
         self.log(stage, "started", f"{stage} stage initiated")
-        return perf_counter()
-
-    def finish(self, stage: str, start: float, message: str = "Completed") -> float:
-        elapsed = round((perf_counter() - start) * 1000, 2)
-        self.log(stage, "completed", message, elapsed)
+        started = perf_counter()
         if self.trace:
             try:
-                self.trace.span(
-                    name=stage,
-                    metadata={"duration_ms": elapsed, "message": message}
-                )
+                self.spans[stage] = self.trace.start_observation(name=stage, as_type="span")
             except Exception:
-                pass
+                logger.exception("Could not start Langfuse stage")
+        return started
+
+    def finish(self, stage: str, start: float, message: str = "Completed", status: str = "completed") -> float:
+        elapsed = round((perf_counter() - start) * 1000, 2)
+        self.log(stage, status, message, elapsed)
+        span = self.spans.pop(stage, None)
+        if span:
+            try:
+                span.update(metadata={"status": status, "duration_ms": elapsed}).end()
+            except Exception:
+                logger.exception("Could not finish Langfuse stage")
         return elapsed
+
+    def close(self, status: str, review_id: str | None = None):
+        if self.trace:
+            try:
+                for span in self.spans.values():
+                    span.update(level="ERROR", status_message="Stage interrupted").end()
+                self.trace.update(
+                    level="DEFAULT" if status == "completed" else "ERROR",
+                    metadata={"status": status, "review_id": review_id},
+                ).end()
+            except Exception:
+                logger.exception("Could not close Langfuse review trace")
+
+    def record_usage(self, provider, model, activity, input_tokens, output_tokens, estimated=False):
+        cost = 0.0
+        if provider == "gemini":
+            rates = (settings.gemini_input_usd_per_million, settings.gemini_output_usd_per_million)
+            if rates == (None, None) and model == "gemini-3.5-flash-lite":
+                rates = (0.30, 2.50)
+            cost = None if None in rates else (input_tokens * rates[0] + output_tokens * rates[1]) / 1_000_000
+        elif provider == "groq":
+            rates = (settings.groq_input_usd_per_million, settings.groq_output_usd_per_million)
+            if rates == (None, None) and model == "openai/gpt-oss-20b":
+                rates = (0.075, 0.30)
+            cost = None if None in rates else (input_tokens * rates[0] + output_tokens * rates[1]) / 1_000_000
+        self.usage.append(ModelUsage(
+            provider=provider, model=model, activity=activity, input_tokens=input_tokens,
+            output_tokens=output_tokens, estimated=estimated, estimated_cost_usd=cost,
+        ))
+        if self.trace:
+            try:
+                self.trace.start_observation(
+                    name=activity, as_type="generation", model=model,
+                    usage_details={"input": input_tokens, "output": output_tokens},
+                    cost_details={"total": cost} if cost is not None else None,
+                    metadata={"provider": provider, "token_counts_estimated": estimated},
+                ).end()
+            except Exception:
+                logger.exception("Could not record Langfuse model usage")

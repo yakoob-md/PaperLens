@@ -14,7 +14,7 @@ import {
   Lightbulb, FileSearch
 } from "lucide-react";
 
-const API = import.meta.env.VITE_API_URL || (import.meta.env.DEV ? "" : "http://localhost:8000");
+const API = import.meta.env.VITE_API_URL || "";
 
 const sample = `Abstract. We propose a lightweight transformer-based approach for scientific document classification. We evaluate on a public dataset of 2,400 abstracts and compare against TF-IDF and a pretrained transformer. The proposed model achieves 4.2% higher macro-F1 than TF-IDF, but only a 0.6% gain over the pretrained transformer. We use a single train-test split and do not report confidence intervals or multiple random seeds. The dataset contains computer science papers from 2019 to 2023. We do not include an ablation study to isolate the contribution of domain-specific embeddings. Methods. The dataset is split into 80% training and 20% testing. We use Adam with learning rate 0.0001 for 10 epochs. Limitations. Our study lacks external validation and ablation analysis.`;
 
@@ -78,6 +78,7 @@ export default function App() {
   // Evaluation state
   const [evalSummary, setEvalSummary] = useState(null);
   const [evalBusy, setEvalBusy] = useState(false);
+  const [evalStep, setEvalStep] = useState("");
 
   // AI Chatbot state
   const [chatMessages, setChatMessages] = useState([]);
@@ -252,15 +253,14 @@ export default function App() {
 
   async function runEvaluationBenchmark() {
     setEvalBusy(true);
+    setEvalStep("Starting the benchmark");
     try {
-      const res = await fetch(API + "/api/evaluation");
-      const data = await res.json();
-      if (!res.ok) throw Error(data.detail || "Evaluation failed");
-      setEvalSummary(data);
+      setEvalSummary(await requestAnalysis(API + "/api/evaluation", {}, setEvalStep));
     } catch (err) {
       alert("Evaluation note: " + err.message);
     } finally {
       setEvalBusy(false);
+      setEvalStep("");
     }
   }
 
@@ -273,6 +273,11 @@ export default function App() {
   const mcpInvocations = report?.mcp_invocations || [];
   const stateTransitions = report?.state_transitions || [];
   const a2aExchanges = report?.a2a_exchanges || [];
+  const modelUsage = report?.model_usage || [];
+  const modelTokens = modelUsage.reduce((total, call) => total + call.input_tokens + call.output_tokens, 0);
+  const modelCost = modelUsage.length && modelUsage.every(call => call.estimated_cost_usd != null)
+    ? modelUsage.reduce((total, call) => total + call.estimated_cost_usd, 0)
+    : null;
 
   const filteredDebate = agentConversation.filter(m => {
     if (debateFilter === "challenges") return !!m.challenge_question;
@@ -733,7 +738,7 @@ export default function App() {
                         <div className="mcp-inv-head">
                           <Terminal size={14} style={{ color: "#17685e" }} />
                           <span className="mcp-tool-title">{inv.tool_name}()</span>
-                          <Badge tone="green">MCP 2024-11-05</Badge>
+                          <Badge tone="green">{inv.protocol}</Badge>
                           <Badge tone={inv.status === "SUCCESS" ? "green" : "amber"}>{inv.status}</Badge>
                           <span style={{ fontSize: "9px", color: "#526176", marginLeft: "auto" }}>
                             Invoked by: <b style={{ color: "#315879" }}>{inv.agent_name}</b> · {inv.duration_ms} ms
@@ -902,10 +907,10 @@ export default function App() {
                   <div className="a2a-banner">
                     <h3>A2A Inter-Agent Communication Protocol (Requirement 6 &amp; 7)</h3>
                     <p>
-                      PaperLens uses <b>CrewAI and Ollama</b>. The CrewAI specialist agents
+                      PaperLens uses <b>CrewAI and Google ADK</b>. The CrewAI specialist agents
                       evaluate Novelty, Methodology, and Evidence, then package findings into a standardized JSON-RPC 2.0 message
                       sent across the <b>A2A Protocol boundary</b> (<code>/.well-known/agent-card.json</code> and <code>/a2a</code>)
-                      to the Ollama Adversarial Critic agent.
+                      to the Google ADK critic, which uses Groq.
                     </p>
                   </div>
 
@@ -915,7 +920,7 @@ export default function App() {
                     <Badge tone="green">/.well-known/agent-card.json</Badge>
                     <span style={{ color: "#17685e" }}>Sender: CrewAI Specialists</span>
                     <span>→ JSON-RPC 2.0 →</span>
-                    <span style={{ color: "#8a540e" }}>Receiver: Ollama Critic</span>
+                    <span style={{ color: "#8a540e" }}>Receiver: Google ADK Critic</span>
                   </div>
 
                   {a2aExchanges.map((ex, i) => (
@@ -955,6 +960,7 @@ export default function App() {
                       </button>
                     </div>
                   </div>
+                  {evalStep && <p className="request-status" role="status">{evalStep}</p>}
 
                   {/* Current Paper Run Stats */}
                   <div className="eval-grid">
@@ -964,14 +970,14 @@ export default function App() {
                       <span>{report.duration_ms.toFixed(0)} ms running time</span>
                     </div>
                     <div className="eval-stat">
-                      <small>ESTIMATED TOKENS</small>
-                      <b>{Math.round(report.paper_title.length / 4 + 2800).toLocaleString()}</b>
-                      <span>Prompt + Completion tokens</span>
+                      <small>MODEL TOKENS</small>
+                      <b>{modelUsage.length ? modelTokens.toLocaleString() : "Unavailable"}</b>
+                      <span>{modelUsage.length} model responses · {modelUsage.filter(call => call.estimated).length} estimated</span>
                     </div>
                     <div className="eval-stat">
                       <small>MODEL API COST</small>
-                      <b>Local</b>
-                      <span>Ollama inference</span>
+                      <b>{modelCost == null ? "Unavailable" : `$${modelCost.toFixed(6)}`}</b>
+                      <span>Estimated provider charges</span>
                     </div>
                     <div className="eval-stat">
                       <small>GUARDRAIL INTEGRITY</small>
@@ -994,18 +1000,18 @@ export default function App() {
                         </div>
                         <div className="eval-stat">
                           <small>TOTAL SUITE COST</small>
-                          <b>${evalSummary.total_estimated_cost_usd}</b>
+                          <b>{evalSummary.total_estimated_cost_usd == null ? "Unavailable" : `$${evalSummary.total_estimated_cost_usd.toFixed(6)}`}</b>
                           <span>USD across all cases</span>
                         </div>
                         <div className="eval-stat">
                           <small>COST PER REVIEW</small>
-                          <b>${evalSummary.average_cost_per_review_usd}</b>
+                          <b>{evalSummary.average_cost_per_review_usd == null ? "Unavailable" : `$${evalSummary.average_cost_per_review_usd.toFixed(6)}`}</b>
                           <span>USD / research paper</span>
                         </div>
                         <div className="eval-stat">
                           <small>TOTAL EVALUATED</small>
-                          <b>{evalSummary.total_cases_evaluated} Cases</b>
-                          <span>Completed reviews</span>
+                          <b>{evalSummary.passed_cases}/{evalSummary.total_cases_evaluated} passed</b>
+                          <span>End-to-end checks</span>
                         </div>
                       </div>
 
@@ -1020,6 +1026,7 @@ export default function App() {
                             <th>Tokens</th>
                             <th>Est. Cost</th>
                             <th>Guardrails</th>
+                            <th>Result</th>
                           </tr>
                         </thead>
                         <tbody>
@@ -1028,11 +1035,12 @@ export default function App() {
                               <td style={{ fontWeight: 700, color: "#17685e" }}>{r.id}</td>
                               <td>{r.title}</td>
                               <td>{r.running_time_seconds}s</td>
-                              <td>{r.novelty_score}/100</td>
-                              <td>{r.feasibility_score}/100</td>
+                              <td>{r.novelty_score == null ? "—" : `${r.novelty_score}/100`}</td>
+                              <td>{r.feasibility_score == null ? "—" : `${r.feasibility_score}/100`}</td>
                               <td>{r.estimated_tokens.toLocaleString()}</td>
-                              <td>${r.estimated_cost_usd}</td>
+                              <td>{r.estimated_cost_usd == null ? "Unavailable" : `$${r.estimated_cost_usd.toFixed(6)}`}</td>
                               <td><Badge tone="green">{r.guardrails_passed} Passed</Badge></td>
+                              <td>{r.passed ? "Pass" : r.issues.join("; ")}</td>
                             </tr>
                           ))}
                         </tbody>
@@ -1147,10 +1155,11 @@ export default function App() {
               {tab === "Critique & logs" && (
                 <div className="logs">
                   <div className="critique">
-                    <b><ShieldCheck /> Adversarial critique (A2A Protocol Pass to Ollama)</b>
+                    <b><ShieldCheck /> Adversarial critique from Google ADK</b>
                     <p>{report.critique_summary}</p>
                   </div>
                   <h3>Pipeline Execution Trace · {report.events.length} events logged</h3>
+                  {report.langfuse_trace_id && <p>Langfuse trace ID <code>{report.langfuse_trace_id}</code></p>}
                   {report.events.map((e, i) => (
                     <div key={i} className="event">
                       <span className={"eventdot " + e.status} />

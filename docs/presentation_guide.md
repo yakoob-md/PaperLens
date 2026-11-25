@@ -13,7 +13,7 @@ cd c:\Users\HP\Downloads\PaperLens_Starter_Project\PaperLens\backend
 uvicorn app.main:app --reload --port 8000
 ```
 - API Health Check: `http://localhost:8000/health`
-- A2A Agent Card: `http://localhost:8000/.well-known/agent-card.json`
+- The A2A panel shows the discovery card and the actual request and response. To expose the critic on a separate local port, follow the [A2A setup](../README.md#a2a-critic-transport).
 - Interactive API Docs: `http://localhost:8000/docs`
 
 ### 2. Start the Frontend Dashboard (React + Vite + Tailwind)
@@ -103,7 +103,7 @@ Open `http://localhost:5173` in your browser.
 - **Code Locations**:
   - A2A Boundary: `backend/app/a2a.py`
   - CrewAI Specialists: `backend/app/crew.py`
-  - Google ADK Agent: `backend/app/adk_agent.py`
+  - Google ADK Agent: `backend/app/a2a.py`
 - **What to show**:
   - Explain the official A2A handshake at `/.well-known/agent-card.json`.
   - Show the JSON-RPC 2.0 request sent from the CrewAI specialist crew to the Google ADK Adversarial Critic agent.
@@ -119,7 +119,7 @@ Open `http://localhost:5173` in your browser.
   - Point out the metrics:
     - **Average running time**: ~2.5 to 11.8 seconds per paper review
     - **Latency**: reported in milliseconds
-    - **Token usage & Cost**: calculated in USD ($0.59 / 1M input, $0.79 / 1M output)
+    - **Token usage & Cost**: estimated from the usage returned by each model and the configured provider rates
     - **Guardrail pass rate**: 100% verified
 
 ---
@@ -142,7 +142,7 @@ Open `http://localhost:5173` in your browser.
 | **4. Agentic Design Patterns** | `backend/app/pipeline.py` & `backend/app/crew.py` | Tab: "Agentic Activity" |
 | **5. Callbacks & Monitoring** | `backend/app/observability.py:AgentCallbackHandler` | Tab: "Critique & logs" |
 | **6. A2A Protocol Communication** | `backend/app/a2a.py` | Tab: "A2A Inter-Agent Protocol" |
-| **7. CrewAI + Google ADK Only** | `app/crew.py` & `app/adk_agent.py` | Badges on every turn in "Agent Debate" |
+| **7. CrewAI + Google ADK Only** | `app/crew.py` & `app/a2a.py` | Badges on every turn in "Agent Debate" |
 | **8. Multi-Layer Guardrails** | `backend/app/guardrails.py` | Tab: "Guardrails & Security" |
 | **9. Observability & Langfuse** | `backend/app/observability.py:RunMonitor` | Pipeline event trace & Langfuse spans |
 | **10. Evaluation & Cost Benchmark** | `backend/evaluation/run_eval.py` | Tab: "Evaluation & Cost" |
