@@ -102,6 +102,8 @@ async def get_llm_status():
         "gemini_configured": bool(settings.google_api_key.strip()),
         "gemini_model": settings.gemini_model,
         "groq_configured": bool(settings.groq_api_key.strip()),
+        "cloudflare_configured": settings.cloudflare_configured,
+        "cloudflare_model": settings.cloudflare_model,
         "reachable": reachable,
         "installed_models": installed,
         "ready": reachable and {settings.groq_model, settings.groq_specialist_model}.issubset(installed),

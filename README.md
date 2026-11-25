@@ -147,6 +147,10 @@ Restart the backend and submit a sample paper. In the report, open **Critique & 
 
 ## Deploy on Render
 
+For a Cloudflare fallback, open **Workers AI → Use REST API** in your Cloudflare account. Create a Workers AI API token and copy its Account ID. Add `CLOUDFLARE_ACCOUNT_ID` and `CLOUDFLARE_API_TOKEN` to `backend/.env` for local use. On an existing Render deployment, add both values under **paperlens-api → Environment** and save and redeploy. The default model is `@cf/openai/gpt-oss-20b`. [Cloudflare credential setup](https://developers.cloudflare.com/workers-ai/get-started/rest-api/)
+
+PaperLens sends Gemini-first tasks to Gemini, then Groq, then Cloudflare. Groq-first tasks try Groq, then Cloudflare, then Gemini if available. Each provider must pass the same response validation. Langfuse records the provider used and estimated token charges at published unit rates, before free allowances.
+
 Create a Blueprint from the GitHub branch containing `render.yaml`. The Blueprint defines one free Docker web service. It builds the React app and serves it from FastAPI, so the website and API share the same HTTPS URL.
 
 Enter `GROQ_API_KEY`, `GOOGLE_API_KEY`, `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY`, and the project's regional `LANGFUSE_BASE_URL` in Render's environment settings. For an existing Blueprint, add new secrets directly to the service. Once Render reports the service is live, open its URL, check `/api/llm-status`, and submit a sample review. Match the trace ID in the report to your Langfuse dashboard. [Render Blueprints](https://render.com/docs/blueprint-spec)

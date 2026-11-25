@@ -21,6 +21,13 @@ class Settings(BaseSettings):
     groq_max_retry_wait_seconds: float = 65.0
     groq_input_usd_per_million: float | None = None
     groq_output_usd_per_million: float | None = None
+    cloudflare_account_id: str = ""
+    cloudflare_api_token: str = ""
+    cloudflare_model: str = "@cf/openai/gpt-oss-20b"
+
+    @property
+    def cloudflare_configured(self) -> bool:
+        return bool(self.cloudflare_account_id.strip() and self.cloudflare_api_token.strip())
 
     @property
     def groq_specialist_model(self) -> str:

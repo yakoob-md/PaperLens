@@ -161,6 +161,9 @@ class RunMonitor:
             if rates == (None, None) and model == "openai/gpt-oss-20b":
                 rates = (0.075, 0.30)
             cost = None if None in rates else (input_tokens * rates[0] + output_tokens * rates[1]) / 1_000_000
+        elif provider == "cloudflare":
+            cost = ((input_tokens * 0.20 + output_tokens * 0.30) / 1_000_000
+                    if model == "@cf/openai/gpt-oss-20b" else None)
         self.usage.append(ModelUsage(
             provider=provider, model=model, activity=activity, input_tokens=input_tokens,
             output_tokens=output_tokens, estimated=estimated, estimated_cost_usd=cost,

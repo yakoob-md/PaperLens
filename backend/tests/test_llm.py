@@ -12,7 +12,8 @@ from app.schemas import PaperOverview
 class GroqModelTests(IsolatedAsyncioTestCase):
     def setUp(self):
         config = patch.object(llm, "settings", Settings(
-            _env_file=None, groq_api_key="test-key", groq_model="test-surface", groq_agent_model="test-agent",
+            _env_file=None, google_api_key="", cloudflare_api_token="",
+            groq_api_key="test-key", groq_model="test-surface", groq_agent_model="test-agent",
         ))
         config.start()
         self.addCleanup(config.stop)
@@ -88,6 +89,45 @@ class GroqModelTests(IsolatedAsyncioTestCase):
 
 
 class GeminiModelTests(IsolatedAsyncioTestCase):
+    async def test_groq_quota_falls_through_to_validated_cloudflare(self):
+        config = Settings(
+            _env_file=None, groq_api_key="test-groq", cloudflare_account_id="example",
+            cloudflare_api_token="test-cloudflare", google_api_key="",
+        )
+        limited = httpx.Response(429, headers={"retry-after": "1"},
+                                 request=httpx.Request("POST", llm.GROQ_URL))
+        valid = PaperOverview(about="A trial", key_outcomes=[], search_query="trial")
+        with (
+            patch.object(llm, "settings", config),
+            patch.object(httpx.AsyncClient, "post", AsyncMock(
+                side_effect=[limited, GroqModelTests.reply("{}"), GroqModelTests.reply(valid.model_dump_json())],
+            )) as post,
+            patch.object(llm.asyncio, "sleep", new_callable=AsyncMock) as sleep,
+            llm.model_session(),
+        ):
+            self.assertEqual(await llm.complete("Review", {}, PaperOverview), valid)
+            self.assertEqual(llm.preferred_model()[:2], ("cloudflare", "@cf/openai/gpt-oss-20b"))
+        self.assertEqual(post.await_count, 3)
+        self.assertIn("accounts/example/ai/v1/chat/completions", post.await_args.args[0])
+        self.assertEqual(post.await_args.kwargs["json"]["response_format"], {"type": "json_object"})
+        sleep.assert_not_awaited()
+
+    async def test_default_route_can_use_gemini_when_both_fallbacks_are_rate_limited(self):
+        config = Settings(
+            _env_file=None, groq_api_key="test-groq", cloudflare_account_id="example",
+            cloudflare_api_token="test-cloudflare", google_api_key="test-gemini",
+        )
+        limited = httpx.Response(429, request=httpx.Request("POST", llm.GROQ_URL))
+        with (
+            patch.object(llm, "settings", config),
+            patch.object(httpx.AsyncClient, "post", AsyncMock(side_effect=[limited, limited])),
+            patch.object(llm, "_gemini_reply", AsyncMock(return_value="Reviewed")) as gemini,
+            llm.model_session(),
+        ):
+            self.assertEqual(await llm.complete("Review", {}), "Reviewed")
+            self.assertEqual(llm.preferred_model()[0], "gemini")
+        gemini.assert_awaited_once()
+
     async def test_three_crewai_specialists_call_gemini_and_emit_callbacks(self):
         from app.observability import RunMonitor, current_monitor
 

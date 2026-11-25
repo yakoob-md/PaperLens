@@ -148,7 +148,7 @@ async def execute_a2a_critique(content: str) -> tuple[str, A2AMessageExchange]:
         raise ModelUnavailable(f"A2A critic request failed ({type(exc).__name__}).") from exc
 
     return answer, A2AMessageExchange(
-        sender_framework="CrewAI specialist reviewers", receiver_framework="Google ADK (Groq)",
+        sender_framework="CrewAI specialist reviewers", receiver_framework="Google ADK",
         handshake_card=base_url + CARD_PATH,
         request_payload=request.model_dump(mode="json", by_alias=True, exclude_none=True),
         response_payload=response.model_dump(mode="json", by_alias=True, exclude_none=True),

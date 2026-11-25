@@ -910,7 +910,7 @@ export default function App() {
                       PaperLens uses <b>CrewAI and Google ADK</b>. The CrewAI specialist agents
                       evaluate Novelty, Methodology, and Evidence, then package findings into a standardized JSON-RPC 2.0 message
                       sent across the <b>A2A Protocol boundary</b> (<code>/.well-known/agent-card.json</code> and <code>/a2a</code>)
-                      to the Google ADK critic, which uses Groq.
+                      to the Google ADK critic. Its model calls use the configured provider fallback chain.
                     </p>
                   </div>
 
