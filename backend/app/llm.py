@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import re
 from time import perf_counter
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -8,7 +9,7 @@ from collections.abc import Callable
 from typing import Literal
 
 import httpx
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from .config import settings
 from .progress import progress
@@ -125,6 +126,43 @@ def _record_usage(provider, model, label, raw, request_text, input_tokens, outpu
         )
 
 
+def provider_failure(response: httpx.Response) -> str:
+    """Summarize provider limits without logging keys, prompts, or response bodies."""
+    status = response.status_code
+    reason = {
+        400: "request rejected", 401: "credentials rejected", 403: "access denied",
+        404: "model or endpoint unavailable", 413: "request too large",
+        429: "rate limit or quota reached",
+    }.get(status, "provider unavailable" if status >= 500 else "request failed")
+    if status in (400, 429):
+        detail = response.text.lower()
+        for pattern, name in (
+            ("tokens per day|\\btpd\\b", "daily token quota"),
+            ("requests per day|\\brpd\\b|daily quota|daily limit|daily allocation", "daily quota"),
+            ("tokens per minute|\\btpm\\b", "per-minute token quota"),
+            ("requests per minute|\\brpm\\b", "per-minute request quota"),
+            ("context.length|context window|too many tokens", "context token limit"),
+        ):
+            if re.search(pattern, detail):
+                reason = name
+                break
+    limits = []
+    for key in ("retry-after", "x-ratelimit-remaining-tokens", "x-ratelimit-remaining-requests",
+                "x-ratelimit-reset-tokens", "x-ratelimit-reset-requests"):
+        value = response.headers.get(key, "")
+        if len(value) <= 24 and re.fullmatch(r"(?:\d+(?:\.\d+)?(?:ms|[dhms])?){1,5}", value):
+            limits.append(f"{key}={value}")
+    return f"HTTP {status} ({reason})" + (f"; {', '.join(limits)}" if limits else "")
+
+
+def completion_failure(exc: Exception) -> str:
+    if isinstance(exc, CompletionRejected):
+        return str(exc)
+    if isinstance(exc, ValidationError):
+        error_types = sorted({item["type"] for item in exc.errors(include_input=False)})
+        return "schema validation failed (" + ", ".join(error_types[:6]) + ")"
+    return type(exc).__name__
+
 async def complete(
     instructions: str, data: object, schema: type[BaseModel] | None = None, *,
     provider: Literal["groq", "gemini"] = "groq",
@@ -179,9 +217,9 @@ async def _complete_gemini(instructions, data, schema, max_output_tokens, label,
         status = exc.response.status_code
         if status in (401, 403, 404, 429, 503):
             disable_gemini_for_review()
-        raise ModelUnavailable(f"Gemini HTTP {status}. Falling back to Groq if available.") from exc
+        raise ModelUnavailable(f"Gemini ({settings.gemini_model}) {provider_failure(exc.response)}. Falling back to Groq if available.") from exc
     except (httpx.HTTPError, ValueError, KeyError, TypeError, IndexError, ModelUnavailable) as exc:
-        raise ModelUnavailable(f"Gemini {type(exc).__name__}. Falling back to Groq if available.") from exc
+        raise ModelUnavailable(f"Gemini ({settings.gemini_model}) {type(exc).__name__}. Falling back to Groq if available.") from exc
     _current_model.set(("gemini", settings.gemini_model, GEMINI_URL))
     logger.info("Gemini completed %s in %.1fs", label, perf_counter() - started)
     return result
@@ -226,6 +264,8 @@ async def _complete_groq(instructions, data, schema, max_output_tokens, label, v
                 return result
             except httpx.HTTPStatusError as exc:
                 status = exc.response.status_code
+                diagnostic = provider_failure(exc.response)
+                logger.warning("Groq model=%s stage=%s attempt=%s %s", model, label, attempt + 1, diagnostic)
                 if status in (401, 403, 404):
                     raise ModelUnavailable(f"Groq returned HTTP {status}. Check your API key and model access.") from exc
                 if status == 429:
@@ -234,7 +274,7 @@ async def _complete_groq(instructions, data, schema, max_output_tokens, label, v
                     except ValueError:
                         delay = 5
                     if settings.cloudflare_configured or attempt == 2 or not 0 <= delay <= settings.groq_max_retry_wait_seconds:
-                        raise ModelUnavailable("Groq rate limit reached. Wait for your quota to reset and retry.") from exc
+                        raise ModelUnavailable(f"Groq rate limit reached for {model}: {diagnostic}.") from exc
                     progress(f"{label}: waiting for Groq rate limits to reset")
                     await asyncio.sleep(max(0.5, delay))
                     continue
@@ -249,10 +289,10 @@ async def _complete_groq(instructions, data, schema, max_output_tokens, label, v
                         continue
                 if status < 500:
                     raise ModelUnavailable(f"Groq rejected the request (HTTP {status}).") from exc
-                logger.warning("Groq returned HTTP %s for %s", status, label)
             except (httpx.HTTPError, ValueError, KeyError, TypeError, IndexError) as exc:
                 # Avoid logging provider bodies or schema-validation inputs.
-                logger.warning("Groq attempt %s failed for %s (%s)", attempt + 1, label, type(exc).__name__)
+                logger.warning("Groq model=%s stage=%s attempt=%s output_cap=%s failure=%s",
+                               model, label, attempt + 1, payload["max_completion_tokens"], completion_failure(exc))
                 retry = "\nReply concisely and include every required field."
     raise ModelUnavailable(f"Groq could not complete {label} with {model}.")
 
@@ -285,6 +325,8 @@ async def _complete_cloudflare(instructions, data, schema, max_output_tokens, la
                 usage = body.get("usage") or {}
                 _record_usage("cloudflare", model, label, raw, json.dumps(messages),
                               usage.get("prompt_tokens"), usage.get("completion_tokens"))
+                if choice.get("finish_reason") == "length":
+                    raise CompletionRejected("Cloudflare reached the response token limit.")
                 if choice.get("finish_reason") not in (None, "stop") or not raw.strip():
                     raise CompletionRejected("Cloudflare returned an incomplete response.")
                 result = schema.model_validate_json(raw) if schema else raw.strip()
@@ -295,14 +337,17 @@ async def _complete_cloudflare(instructions, data, schema, max_output_tokens, la
                 return result
             except httpx.HTTPStatusError as exc:
                 status = exc.response.status_code
+                diagnostic = provider_failure(exc.response)
+                logger.warning("Cloudflare model=%s stage=%s attempt=%s %s", model, label, attempt + 1, diagnostic)
                 if status == 400 and json_mode and not attempt:
                     json_mode = False
                     retry = "\nReply with a complete JSON object only."
                     continue
                 if status < 500:
-                    raise ModelUnavailable(f"Cloudflare HTTP {status}. Check your Workers AI token, model, or quota.") from exc
+                    raise ModelUnavailable(f"Cloudflare ({model}) {diagnostic}.") from exc
             except (httpx.HTTPError, ValueError, KeyError, TypeError, IndexError) as exc:
-                logger.warning("Cloudflare attempt %s failed for %s (%s)", attempt + 1, label, type(exc).__name__)
+                logger.warning("Cloudflare model=%s stage=%s attempt=%s output_cap=%s failure=%s",
+                               model, label, attempt + 1, payload["max_tokens"], completion_failure(exc))
                 retry = "\nReply concisely and include every required field."
     raise ModelUnavailable(f"Cloudflare could not complete {label} with {model}.")
 

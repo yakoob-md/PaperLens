@@ -263,6 +263,31 @@ async def _run_review(title: str, text: str, monitor: RunMonitor) -> ReviewRepor
             "source": source_name
         })
 
+    literature_finished = False
+
+    async def extractive_report(reason: str) -> ReviewReport:
+        progress("Preparing an extractive report from available evidence")
+        monitor.log("review.extractive_fallback", "warning", reason)
+        if not literature_finished:
+            monitor.finish("multi_source_literature_retrieval", t_lit, inv_lit.response_summary,
+                           "completed" if inv_lit.status == "SUCCESS" else "error")
+        await check_full_text(state["sources"], overview.about, use_model=False)
+        return ReviewReport(
+            review_id=str(uuid.uuid4())[:8], paper_title=title, overview=overview,
+            overall_recommendation="insufficient_evidence",
+            summary=overview.about, novelty_score=None, feasibility_score=None, evidence_coverage=None,
+            findings=[], critique_summary="", sources=[SourcePaper.model_validate(source) for source in state["sources"]],
+            limitations=[reason, "This partial report includes the available paper text and retrieved literature. "
+                         "Overall review scores, findings, and critique require a successful model review."],
+            execution_mode="extractive_fallback", duration_ms=(time.perf_counter()-started_all)*1000,
+            events=monitor.events, model_usage=monitor.usage, langfuse_trace_id=monitor.trace_id,
+            guardrail_audits=all_guardrail_audits, mcp_invocations=all_mcp_invocations,
+            state_transitions=state_transitions,
+        )
+
+    if overview.extractive:
+        return await extractive_report("The model providers could not generate a paper overview.")
+
     if state["sources"]:
         progress("Comparing the paper with retrieved literature")
         expected_ids = {source["source_id"] for source in state["sources"]}
@@ -272,29 +297,32 @@ async def _run_review(title: str, text: str, monitor: RunMonitor) -> ReviewRepor
             if len(ids) != len(expected_ids) or set(ids) != expected_ids:
                 raise ValueError("Each supplied source ID must appear exactly once.")
 
-        comparisons = await complete(
-            "For each supplied literature record, assess its similarity to the submitted paper on a scale from 0 to 100. "
-            "Use only the given titles and abstract excerpts. Give one short sentence per source and note limited evidence. "
-            "Return every source ID exactly once.",
-            {
-                "title": title,
-                "overview": overview.about,
-                "outcomes": overview.key_outcomes,
-                "sources": [
-                    {"source_id": source["source_id"], "title": source["title"], "abstract": source["abstract"][:450]}
-                    for source in state["sources"]
-                ],
-            },
-            LiteratureAssessment,
-            provider="groq",
-            activity="Abstract similarity assessment",
-            max_output_tokens=750,
-            validate=validate_sources,
-        )
+        try:
+            comparisons = await complete(
+                "For each supplied literature record, assess its similarity to the submitted paper on a scale from 0 to 100. "
+                "Use only the given titles and abstract excerpts. Give one short sentence per source and note limited evidence. "
+                "Return every source ID exactly once.",
+                {
+                    "title": title,
+                    "overview": overview.about,
+                    "outcomes": overview.key_outcomes,
+                    "sources": [
+                        {"source_id": source["source_id"], "title": source["title"], "abstract": source["abstract"][:450]}
+                        for source in state["sources"]
+                    ],
+                },
+                LiteratureAssessment,
+                provider="groq",
+                activity="Abstract similarity assessment",
+                max_output_tokens=750,
+                validate=validate_sources,
+            )
+        except ModelUnavailable:
+            return await extractive_report("The model providers could not compare the retrieved literature.")
         _, similarity_model, _ = preferred_model()
         by_id = {item.source_id: item for item in comparisons.sources}
         if len(by_id) != len(comparisons.sources) or set(by_id) != {item["source_id"] for item in state["sources"]}:
-            raise ModelUnavailable("The model returned an incomplete literature comparison. Please retry.")
+            return await extractive_report("The model returned an incomplete literature comparison.")
         for source in state["sources"]:
             source.update(by_id[source["source_id"]].model_dump())
 
@@ -308,6 +336,7 @@ async def _run_review(title: str, text: str, monitor: RunMonitor) -> ReviewRepor
         monitor.finish("multi_source_literature_retrieval", t_lit, inv_lit.response_summary, "error")
         monitor.callbacks.on_task_error("Multi-Source Literature Retriever", "search_academic_literature", t_lit, ValueError(inv_lit.response_summary))
 
+    literature_finished = True
     state_transitions.append(StateTransition(
         step_number=3,
         stage_name="Multi-Source Literature Retrieval via FastMCP",
@@ -365,7 +394,7 @@ async def _run_review(title: str, text: str, monitor: RunMonitor) -> ReviewRepor
     except ModelUnavailable:
         analysis = recover_specialist_review(notes, source_ids, overview.about)
         if analysis is None:
-            raise
+            return await extractive_report("The model providers could not synthesize the review.")
         synthesis_recovered = True
         synthesis_note = f"Recovered the scores and findings produced by {specialist_model} via CrewAI."
         progress("Assembling the report from completed specialist reviews")

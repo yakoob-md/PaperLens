@@ -10,6 +10,14 @@ from app.schemas import PaperOverview
 
 
 class GroqModelTests(IsolatedAsyncioTestCase):
+    def test_diagnostic_names_reported_daily_limit_without_provider_body(self):
+        response = httpx.Response(429, json={"error": "Daily limit: tokens per day. private request text"},
+                                 headers={"retry-after": "32"})
+        message = llm.provider_failure(response)
+        self.assertIn("daily token quota", message)
+        self.assertIn("retry-after=32", message)
+        self.assertNotIn("private request text", message)
+
     def setUp(self):
         config = patch.object(llm, "settings", Settings(
             _env_file=None, google_api_key="", cloudflare_api_token="",

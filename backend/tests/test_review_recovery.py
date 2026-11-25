@@ -2,12 +2,35 @@
 from unittest import IsolatedAsyncioTestCase
 from unittest.mock import AsyncMock, patch
 
-from app import a2a, pipeline
+from app import a2a, overview, pipeline
 from app.llm import ModelUnavailable
 from app.schemas import McpToolInvocation, PaperOverview
 
 
 class ReviewRecoveryTests(IsolatedAsyncioTestCase):
+    async def test_provider_outage_returns_extract_and_unscored_source(self):
+        text = "Abstract\nMulched plots retained more moisture than untreated plots in the field trial."
+
+        async def call_tool(name, *_args):
+            return {"papers": [{"title": "Mulching and moisture", "source_id": "test",
+                                "url": "https://example.org/paper", "abstract": text}]}, McpToolInvocation(
+                call_id=name, timestamp="", agent_name="", tool_name=name,
+                response_summary="", duration_ms=0, status="SUCCESS",
+            )
+
+        with (
+            patch.object(overview, "complete", AsyncMock(side_effect=ModelUnavailable("offline"))),
+            patch.object(pipeline, "call_mcp_tool", call_tool),
+            patch.object(pipeline, "run_crewai_review", AsyncMock()) as crew,
+        ):
+            report = await pipeline.run_review("Mulch study", text)
+        self.assertEqual(report.execution_mode, "extractive_fallback")
+        self.assertTrue(report.overview.extractive)
+        self.assertIsNone(report.novelty_score)
+        self.assertIsNone(report.sources[0].similarity_percentage)
+        self.assertEqual(report.sources[0].source_id, "test")
+        crew.assert_not_awaited()
+
     async def test_report_keeps_specialist_scores_when_late_steps_fail(self):
         text = "Mulched plots retained 12 percent more moisture than untreated plots. " * 1000
         notes = [

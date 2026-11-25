@@ -15,6 +15,7 @@ class PaperOverview(BaseModel):
     about: str = Field(min_length=1, max_length=2400)
     key_outcomes: list[str] = Field(max_length=8)
     search_query: str = Field(min_length=1, max_length=250)
+    extractive: bool = False
 
 
 class FullTextPassage(BaseModel):
@@ -45,7 +46,7 @@ class SourcePaper(BaseModel):
     pdf_url: str | None = None
     abstract: str = ""
     source: str = "arXiv"
-    similarity_percentage: int = Field(default=0, ge=0, le=100)
+    similarity_percentage: int | None = Field(default=None, ge=0, le=100)
     relevance_explanation: str = ""
     full_text_evidence: FullTextEvidence | None = None
 
@@ -178,15 +179,15 @@ class ReviewReport(BaseModel):
     overview: PaperOverview | None = None
     overall_recommendation: Literal["major_revision", "minor_revision", "promising", "insufficient_evidence"]
     summary: str
-    novelty_score: int = Field(ge=0, le=100)
-    feasibility_score: int = Field(ge=0, le=100)
+    novelty_score: int | None = Field(ge=0, le=100)
+    feasibility_score: int | None = Field(ge=0, le=100)
     findings: list[Finding]
     critique_summary: str
     sources: list[SourcePaper]
     limitations: list[str]
-    evidence_coverage: float = Field(ge=0, le=1)
+    evidence_coverage: float | None = Field(ge=0, le=1)
     synthesis_recovered: bool = False
-    execution_mode: Literal["live_llm", "demo_fallback"]
+    execution_mode: Literal["live_llm", "demo_fallback", "extractive_fallback"]
     duration_ms: float
     events: list[PipelineEvent]
     model_usage: list[ModelUsage] = Field(default_factory=list)
@@ -292,8 +293,8 @@ class SimilarPaper(BaseModel):
     doi: str | None = None
     url: str
     pdf_url: str | None = None
-    similarity_percentage: int = Field(ge=0, le=100)
-    relevance_category: Literal["high", "moderate", "low"]
+    similarity_percentage: int | None = Field(ge=0, le=100)
+    relevance_category: Literal["high", "moderate", "low"] | None
     overlap_summary: str
     highlights: list[OverlapHighlight] = Field(default_factory=list)
     full_text_preview: str | None = None

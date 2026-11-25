@@ -131,7 +131,7 @@ class _EvidenceResult(BaseModel):
     passages: list[_EvidenceItem] = Field(max_length=3)
 
 
-async def check_full_text(sources: list[dict], subject: str) -> None:
+async def check_full_text(sources: list[dict], subject: str, *, use_model: bool = True) -> None:
     """Inspect up to three readable PDFs in similarity order."""
     shortlist = []
     for source in sources:
@@ -142,8 +142,10 @@ async def check_full_text(sources: list[dict], subject: str) -> None:
             note="This PDF was outside the full-text review shortlist." if url
             else "The literature index did not provide a PDF on a supported open repository.",
         )
-        if url:
+        if url and use_model:
             shortlist.append((source, url))
+        elif url:
+            source["full_text_evidence"].note = "PDF comparison is unavailable in the extractive report."
     if not shortlist:
         return
     progress("Checking full-text evidence for the closest matches")

@@ -240,7 +240,17 @@ async def check_research_idea_novelty(title: str, text: str) -> IdeaNoveltyRepor
 async def _check_research_idea_novelty(title: str, text: str, monitor: RunMonitor) -> IdeaNoveltyReport:
     started = time.perf_counter()
     progress("Identifying the research question, methods, and search terms")
-    analysis = await _llm_analysis(title, text)
+    fallback = False
+    try:
+        analysis = await _llm_analysis(title, text)
+    except ModelUnavailable:
+        fallback = True
+        query = " ".join((title or text).split()[:12])[:200]
+        analysis = IdeaAnalysis(
+            problem_statement=" ".join(text.split())[:800], research_objectives=[],
+            proposed_methodology="", key_concepts_and_technologies=[], research_domain="",
+            potential_contributions=[], important_keywords=[query] if query else [],
+        )
     progress("Searching academic indexes for related work")
     search_started = monitor.start("idea_literature_search")
     candidates, succeeded, failed = await _search(analysis)
@@ -271,21 +281,41 @@ async def _check_research_idea_novelty(title: str, text: str, monitor: RunMonito
         if not ids and result.assessment.novelty_score is not None:
             raise ValueError("Novelty requires related literature evidence.")
 
-    result = await complete(
-        "Evaluate the idea against the supplied literature records. Select up to five meaningfully related "
-        "papers and use only their supplied paper_id values. Score similarity independently for each. "
-        "Never claim identical work based on a title match. Only include highlights with exact quotes from "
-        "the corresponding abstract, with section Abstract and page null. Include at most two highlights per paper. Assess novelty against the "
-        "retrieved evidence and explain uncertainty. Return a null novelty_score if evidence is insufficient. "
-        "Suggest research gaps as tentative opportunities rather than verified absences.",
-        {**context, "sources": sources},
-        IdeaComparison,
-        provider="gemini",
-        activity="Research idea novelty assessment",
-        max_output_tokens=2300,
-        validate=validate_comparison,
-    )
+    try:
+        if not fallback:
+            result = await complete(
+                "Evaluate the idea against the supplied literature records. Select up to five meaningfully related "
+                "papers and use only their supplied paper_id values. Score similarity independently for each. "
+                "Never claim identical work based on a title match. Only include highlights with exact quotes from "
+                "the corresponding abstract, with section Abstract and page null. Include at most two highlights per paper. Assess novelty against the "
+                "retrieved evidence and explain uncertainty. Return a null novelty_score if evidence is insufficient. "
+                "Suggest research gaps as tentative opportunities rather than verified absences.",
+                {**context, "sources": sources},
+                IdeaComparison,
+                provider="gemini",
+                activity="Research idea novelty assessment",
+                max_output_tokens=2300,
+                validate=validate_comparison,
+            )
+            validate_comparison(result)
+    except (ModelUnavailable, ValueError):
+        fallback = True
+    if fallback:
+        progress("Preparing an extractive idea report from available evidence")
+        monitor.log("idea.extractive_fallback", "warning", "Model analysis was unavailable.")
+        result = IdeaComparison(
+            assessment=NoveltyAssessment(
+                category="Partial report", explanation="Model analysis was unavailable. Search results are shown for inspection.",
+                observations=[], explored_aspects=[], similar_aspects=[], distinctive_opportunities=[],
+                disclaimer="Novelty and similarity were not scored.",
+            ),
+            papers=[], research_gaps=ResearchGap(covered_areas=[], underexplored_areas=[],
+                suggested_directions=[], differentiation_opportunities=[]),
+            recommendations=[],
+        )
     _, model, _ = preferred_model()
+    if fallback:
+        model = "Extractive fallback"
     progress("Verifying references and assembling the idea report")
     returned_ids = {paper.paper_id for paper in result.papers}
     if len(returned_ids) != len(result.papers) or not returned_ids.issubset(by_id):
@@ -293,7 +323,11 @@ async def _check_research_idea_novelty(title: str, text: str, monitor: RunMonito
     if (not candidates or not result.papers) and result.assessment.novelty_score is not None:
         raise ModelUnavailable("The model assigned a novelty score without related evidence. Please retry.")
 
-    papers = []
+    papers = [
+        SimilarPaper(**record, similarity_percentage=None, relevance_category=None,
+                     overlap_summary="Retrieved for inspection. Model comparison was unavailable.")
+        for record in list(by_id.values())[:5]
+    ] if fallback else []
     for match in sorted(result.papers, key=lambda item: item.similarity_percentage, reverse=True):
         record = by_id[match.paper_id]
         abstract = _normalized(record["abstract"])
@@ -308,7 +342,7 @@ async def _check_research_idea_novelty(title: str, text: str, monitor: RunMonito
     source_records = [paper.model_dump() for paper in papers]
     evidence_started = monitor.start("idea_evidence")
     await check_full_text(source_records, "\n".join([title, analysis.problem_statement,
-        analysis.proposed_methodology, *analysis.research_objectives]))
+        analysis.proposed_methodology, *analysis.research_objectives]), use_model=not fallback)
     monitor.finish("idea_evidence", evidence_started)
     papers = [SimilarPaper.model_validate(record) for record in source_records]
 
@@ -332,10 +366,10 @@ async def _check_research_idea_novelty(title: str, text: str, monitor: RunMonito
         execution_time_seconds=round(time.perf_counter() - started, 3),
         timestamp=datetime.datetime.now(datetime.timezone.utc).isoformat(),
         scoring_provenance=ScoringProvenance(
-            methodology="LLM comparison grounded in retrieved academic records",
+            methodology="Extractive proposal and retrieved records" if fallback else "LLM comparison grounded in retrieved academic records",
             similarity_engine=model,
             novelty_auditor=model,
             feasibility_auditor=model,
-            audit_trail=[f"{model} compared {len(by_id)} retrieved records against the idea."],
+            audit_trail=["Model scoring unavailable."] if fallback else [f"{model} compared {len(by_id)} retrieved records against the idea."],
         ),
     )

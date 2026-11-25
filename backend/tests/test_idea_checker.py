@@ -127,9 +127,10 @@ class PipelineTests(IsolatedAsyncioTestCase):
         self.assertEqual([item.text_snippet for item in report.similar_papers[0].highlights], [RELATED["abstract"]])
         self.assertIsNone(report.similar_papers[0].highlights[0].page)
 
-    async def test_model_failure_is_propagated_before_literature_search(self):
+    async def test_model_failure_returns_unscored_retrieved_papers(self):
         with patch.object(idea_checker, "complete", AsyncMock(side_effect=idea_checker.ModelUnavailable("offline"))), \
-             patch.object(idea_checker, "_search", AsyncMock()) as search:
-            with self.assertRaises(idea_checker.ModelUnavailable):
-                await idea_checker.check_research_idea_novelty("PaperLens", SYNOPSIS)
-        search.assert_not_awaited()
+             patch.object(idea_checker, "_search", AsyncMock(return_value=([RELATED], ["OpenAlex"], []))):
+            report = await idea_checker.check_research_idea_novelty("PaperLens", SYNOPSIS)
+        self.assertIsNone(report.assessment.novelty_score)
+        self.assertIsNone(report.similar_papers[0].similarity_percentage)
+        self.assertEqual(report.similar_papers[0].url, RELATED["url"])

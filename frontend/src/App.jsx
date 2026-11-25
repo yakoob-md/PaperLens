@@ -28,6 +28,7 @@ function PaperOverview({ overview }) {
     <section className="paper-overview" aria-label="Paper overview">
       <h2>What this paper is about</h2>
       <p>{overview.about}</p>
+      {overview.extractive && <p className="request-status">Excerpt from your paper. Model analysis is temporarily unavailable.</p>}
       <h3>Key outcomes</h3>
       {overview.key_outcomes.length
         ? <ul>{overview.key_outcomes.map((outcome, index) => <li key={index}>{outcome}</li>)}</ul>
@@ -179,7 +180,7 @@ export default function App() {
     setChatMessages([
       {
         role: "assistant",
-        content: `👋 Ready to compare your paper with **"${source.title}"** (${source.similarity_percentage}% similarity).\n\nAsk me anything about their methodology, datasets, baseline models, key findings, or how to answer the challenge questions thrown by the review agents!`
+        content: `👋 Ready to compare your paper with **"${source.title}"** ${source.similarity_percentage == null ? "(unscored source)" : `(${source.similarity_percentage}% similarity)`}.\n\nAsk me anything about their methodology, datasets, baseline models, key findings, or how to answer the challenge questions thrown by the review agents!`
       }
     ]);
   }
@@ -379,7 +380,10 @@ export default function App() {
                 </div>
               </div>
 
-              {(overview || report.overview) && <PaperOverview overview={overview || report.overview} />}
+              {(report.overview || overview) && <PaperOverview overview={report.overview || overview} />}
+              {report.execution_mode === "extractive_fallback" && (
+                <p className="request-status" role="status">Partial report. Available source evidence is shown, and unverified scores are left blank.</p>
+              )}
 
               <AnalysisProgress steps={reviewSteps} />
 
@@ -387,17 +391,17 @@ export default function App() {
               <div className="stats">
                 <div>
                   <small>NOVELTY ESTIMATE</small>
-                  <b>{report.novelty_score}<i>/100</i></b>
+                  <b>{report.novelty_score == null ? "Unavailable" : `${report.novelty_score}/100`}</b>
                   <span>Literature differentiation</span>
                 </div>
                 <div>
                   <small>FEASIBILITY</small>
-                  <b>{report.feasibility_score}<i>/100</i></b>
+                  <b>{report.feasibility_score == null ? "Unavailable" : `${report.feasibility_score}/100`}</b>
                   <span>Methods &amp; hygiene audit</span>
                 </div>
                 <div>
                   <small>EVIDENCE COVERAGE</small>
-                  <b>{Math.round(report.evidence_coverage * 100)}<i>%</i></b>
+                  <b>{report.evidence_coverage == null ? "Unavailable" : `${Math.round(report.evidence_coverage * 100)}%`}</b>
                   <span>{report.sources.length} multi-source citations</span>
                 </div>
                 <div>
@@ -411,7 +415,7 @@ export default function App() {
               <div className="recommend">
                 <ShieldCheck />
                 <div>
-                  <small>PANEL CONSENSUS RECOMMENDATION</small>
+                  <small>{report.execution_mode === "extractive_fallback" ? "REVIEW STATUS" : "PANEL CONSENSUS RECOMMENDATION"}</small>
                   <b>{report.synthesis_recovered ? "Specialist results recovered" : report.overall_recommendation.replaceAll("_", " ")}</b>
                   <p>{report.summary}</p>
                 </div>
@@ -1188,7 +1192,7 @@ export default function App() {
                       ))}
                     </select>
                     {selectedSourceForChat && (
-                      <Badge tone="green">{selectedSourceForChat.similarity_percentage}% Similarity</Badge>
+                      <Badge tone="green">{selectedSourceForChat.similarity_percentage == null ? "Unscored" : `${selectedSourceForChat.similarity_percentage}% Similarity`}</Badge>
                     )}
                   </div>
 

@@ -100,7 +100,7 @@ export function ResearchTree({ report, onInspect }) {
           <div key={paper.paper_id}>
           <Branch
             label={paper.title}
-            meta={`${paper.similarity_percentage}% overlap`}
+            meta={paper.similarity_percentage == null ? "Unscored" : `${paper.similarity_percentage}% overlap`}
           >
             <p className="paper-metadata">
               {[paper.authors.join(", "), paper.year, paper.venue, paper.doi && "DOI " + paper.doi].filter(Boolean).join(" · ")}
@@ -261,7 +261,7 @@ export function PaperViewer({ paper, api, onClose }) {
                 fontSize: "11px",
                 fontWeight: "600"
               }}>
-                {`${paper.similarity_percentage}% Conceptual Overlap`}
+                {paper.similarity_percentage == null ? "Unscored source" : `${paper.similarity_percentage}% Conceptual Overlap`}
               </span>
             </div>
             <h2 id="paper-viewer-title">{paper.title}</h2>
