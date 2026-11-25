@@ -5,9 +5,9 @@ import {
   Layers3, Lightbulb, Target, X
 } from "lucide-react";
 
-function Branch({ label, Icon, meta, children }) {
+function Branch({ label, Icon, meta, initiallyOpen, children }) {
   return (
-    <details className="research-branch">
+    <details className="research-branch" open={initiallyOpen}>
       <summary>
         {Icon && <span className="branch-icon"><Icon size={17} aria-hidden="true" /></span>}
         <span className="branch-label">{label}</span>
@@ -93,12 +93,12 @@ export function ResearchTree({ report, onInspect }) {
         <ResearchNote label="Ways to differentiate" value={assessment.distinctive_opportunities} />
         <ResearchNote label="Assessment limitations" value={assessment.disclaimer} />
       </Branch>
-      <Branch label="Related papers" Icon={BookOpen} meta={String(papers.length)}>
+      <Branch label="Related papers and evidence" Icon={BookOpen} meta={String(papers.length)} initiallyOpen>
         {papers.length > 0 && <p>Overlap estimates use the titles and available abstracts.</p>}
         {papers.length === 0 && <p>No related papers were retrieved.</p>}
         {papers.map(paper => (
+          <div key={paper.paper_id}>
           <Branch
-            key={paper.paper_id}
             label={paper.title}
             meta={`${paper.similarity_percentage}% overlap`}
           >
@@ -107,9 +107,6 @@ export function ResearchTree({ report, onInspect }) {
             </p>
             <div className="research-actions">
               <EvidenceBadge paper={paper} />
-              <button className="ghost" onClick={() => onInspect(paper)}>
-                <Highlighter size={15} /> Inspect evidence
-              </button>
               <a className="ghost" href={paper.url} target="_blank" rel="noopener noreferrer">
                 Open source <ArrowUpRight size={15} />
               </a>
@@ -118,6 +115,10 @@ export function ResearchTree({ report, onInspect }) {
             <ResearchNote label="Abstract" value={paper.abstract} />
             <ResearchNote label={"Overlap summary · " + paper.similarity_percentage + "% similarity"} value={paper.overlap_summary} />
           </Branch>
+          <button type="button" className="ghost" aria-label={`Inspect evidence for ${paper.title}`} onClick={() => onInspect(paper)}>
+            <Highlighter size={15} /> Inspect evidence
+          </button>
+          </div>
         ))}
       </Branch>
       <Branch label="Research gaps" Icon={Layers3}>
@@ -203,11 +204,12 @@ export function PaperViewer({ paper, api, onClose }) {
   const dialog = useRef(null);
   const detailClose = useRef(null);
   const passageButtons = useRef(new Map());
-  const [view, setView] = useState(() => paper.full_text_evidence?.passages.length ? "evidence" : "passages");
+  const [view, setView] = useState(() => paper.full_text_evidence?.passages?.length ? "evidence" : "passages");
   const [pdfOpened, setPdfOpened] = useState(false);
   const [selection, setSelection] = useState(null);
   const [category, setCategory] = useState("");
   const highlights = paper.highlights || [];
+  const abstractPassages = paper.full_text_evidence?.abstract_passages || [];
   const visibleHighlights = highlights.filter(highlight => !category || highlight.category === category);
   const active = visibleHighlights.find(highlight => highlight.highlight_id === selection);
   const evidencePdf = paper.full_text_evidence?.pdf_url;
@@ -320,8 +322,18 @@ export function PaperViewer({ paper, api, onClose }) {
               <h3>{highlights.length ? "Highlighted passages" : "Overlap assessment"}</h3>
               {paper.overlap_summary && <p>{paper.overlap_summary}</p>}
               <p className="viewer-instruction">
-                {visibleHighlights.length ? "Select highlighted text to see why it overlaps." : "This comparison uses the available title and abstract."}
+                {visibleHighlights.length ? "Select a passage to see why it overlaps." :
+                  abstractPassages.length ? "These quotes are from the source abstract. Shared terms indicate possible overlap." :
+                  paper.abstract ? "No specific overlap passage was identified. The source abstract is shown below." :
+                  "The literature index supplied no abstract for this source."}
               </p>
+              {!highlights.length && abstractPassages.map(({ quote, shared_terms }) => (
+                <figure key={quote}>
+                  <figcaption>Source abstract</figcaption>
+                  <blockquote><mark>{quote}</mark></blockquote>
+                  <p>Shared terms · {shared_terms.join(", ")}</p>
+                </figure>
+              ))}
               {visibleHighlights.map(highlight => (
                 <figure key={highlight.highlight_id}>
                   <figcaption>{highlight.section}{highlight.page != null && (" · Page " + highlight.page)}</figcaption>
@@ -341,7 +353,7 @@ export function PaperViewer({ paper, api, onClose }) {
                 </figure>
               ))}
               {paper.abstract && (
-                <details className="viewer-abstract">
+                <details className="viewer-abstract" open={!highlights.length && !abstractPassages.length}>
                   <summary>Abstract</summary>
                   <p>{paper.abstract}</p>
                 </details>

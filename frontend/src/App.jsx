@@ -4,7 +4,7 @@ import AnalysisProgress from "./AnalysisProgress.jsx";
 import { requestAnalysis } from "./requestAnalysis.js";
 import React, { useEffect, useState } from "react";
 import Dropzone, { pdfFiles, proposalFiles } from "./Dropzone.jsx";
-import { ResearchTree, PaperViewer, EvidenceBadge, FullTextEvidence } from "./ResearchResults.jsx";
+import { ResearchTree, PaperViewer, EvidenceBadge } from "./ResearchResults.jsx";
 import {
   Microscope, FileText, Sparkles, BookOpen, ShieldCheck,
   Gauge, Search, Activity, ArrowUpRight,
@@ -461,7 +461,7 @@ export default function App() {
                 <div className="tabs">
                   {[
                     ["Findings", "Findings"],
-                    ["Literature", "Literature"],
+                    ["Literature", "Literature & evidence"],
                     ["AI Paper Chat", "Paper chat"]
                   ].map(([value, label]) => (
                     <button key={value} className={tab === value ? "sel" : ""} aria-pressed={tab === value} onClick={() => setTab(value)}>
@@ -1070,18 +1070,11 @@ export default function App() {
                             </Badge>
                           </div>
                           <p>{s.authors?.slice(0, 3).join(", ")} {s.year ? `(${s.year})` : ""}</p>
-                          <p>{s.abstract}</p>
-                          {s.relevance_explanation && (
-                            <div className="next" style={{ marginTop: "8px", padding: "8px 10px" }}>
-                              <b>Relevance:</b> <span style={{ color: "#526176" }}>{s.relevance_explanation}</span>
-                            </div>
-                          )}
-                          <FullTextEvidence paper={s} />
                           <div style={{ display: "flex", gap: "8px", alignItems: "center", marginTop: "10px", flexWrap: "wrap" }}>
                             <button className="ghost" onClick={() => setSelectedPaperForViewer({
                               ...s, overlap_summary: s.relevance_explanation,
                             })}>
-                              Inspect overlap and PDF
+                              Inspect evidence
                             </button>
                             <a href={s.url} target="_blank" rel="noreferrer" className="ghost" style={{ padding: "6px 10px", fontSize: "9px" }}>
                               Open source ↗
@@ -1094,6 +1087,7 @@ export default function App() {
                               <MessageSquare size={12} /> Discuss with AI Chatbot
                             </button>
                           </div>
+                          {s.relevance_explanation && <p>{s.relevance_explanation}</p>}
                         </div>
                       </article>
                     ))}
@@ -1276,6 +1270,7 @@ export default function App() {
                     <div className="eyebrow">Research idea report</div>
                     <h1>{ideaReport.title}</h1>
                     <p>{ideaReport.total_papers_searched} papers searched</p>
+                    {ideaReport.langfuse_trace_id && <p>Langfuse trace ID <code>{ideaReport.langfuse_trace_id}</code></p>}
                   </div>
                   <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
                     <ReportDownloads report={ideaReport} api={API} />

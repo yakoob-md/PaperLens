@@ -23,10 +23,16 @@ class FullTextPassage(BaseModel):
     comparison: str
 
 
+class AbstractPassage(BaseModel):
+    quote: str
+    shared_terms: list[str]
+
+
 class FullTextEvidence(BaseModel):
     status: Literal["abstract_only", "full_text_evidence"]
     pdf_url: str | None = None
     passages: list[FullTextPassage] = Field(default_factory=list)
+    abstract_passages: list[AbstractPassage] = Field(default_factory=list)
     note: str
 
 
@@ -310,6 +316,7 @@ class NoveltyAssessment(BaseModel):
     disclaimer: str
 
 class IdeaNoveltyReport(BaseModel):
+    langfuse_trace_id: str | None = None
     report_id: str
     title: str
     submitted_idea_preview: str

@@ -16,6 +16,16 @@ class FullTextTests(TestCase):
 
 
 class EvidenceTests(IsolatedAsyncioTestCase):
+    async def test_abstract_only_source_preserves_exact_located_passage(self):
+        quote = "Mulching increased moisture retention compared with untreated plots."
+        source = {"url": "https://example.org/paper", "title": "Water retention", "abstract": quote}
+        await full_text.check_full_text([source], "Does mulching increase moisture retention?")
+        evidence = source["full_text_evidence"]
+        self.assertEqual(evidence.status, "abstract_only")
+        self.assertEqual(evidence.passages, [])
+        self.assertEqual(evidence.abstract_passages[0].quote, quote)
+        self.assertIn("retention", evidence.abstract_passages[0].shared_terms)
+
     async def test_evidence_quotes_are_verified_without_altering_abstract_scores(self):
         quote = "The mulched plots retained more water than the untreated plots after six weeks."
         sources = [

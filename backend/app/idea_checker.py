@@ -19,6 +19,7 @@ from typing import Literal
 
 from .progress import progress
 from .full_text import check_full_text, supported_pdf
+from .observability import RunMonitor, current_monitor
 from .config import settings
 from .llm import preferred_model, complete, excerpt, ModelUnavailable
 from .schemas import IdeaAnalysis, IdeaNoveltyReport, NoveltyAssessment, OverlapHighlight, ResearchGap, SimilarPaper, ScoringProvenance
@@ -222,11 +223,28 @@ async def _search(analysis: IdeaAnalysis) -> tuple[list[dict], list[str], list[s
 
 
 async def check_research_idea_novelty(title: str, text: str) -> IdeaNoveltyReport:
+    monitor = RunMonitor("paperlens_idea")
+    token = current_monitor.set(monitor)
+    report = None
+    try:
+        report = await _check_research_idea_novelty(title, text, monitor)
+        return report
+    except Exception as exc:
+        monitor.log("idea_review", "error", type(exc).__name__)
+        raise
+    finally:
+        monitor.close("completed" if report else "error", report.report_id if report else None)
+        current_monitor.reset(token)
+
+
+async def _check_research_idea_novelty(title: str, text: str, monitor: RunMonitor) -> IdeaNoveltyReport:
     started = time.perf_counter()
     progress("Identifying the research question, methods, and search terms")
     analysis = await _llm_analysis(title, text)
     progress("Searching academic indexes for related work")
+    search_started = monitor.start("idea_literature_search")
     candidates, succeeded, failed = await _search(analysis)
+    monitor.finish("idea_literature_search", search_started)
     # Keep complete records for reporting and use short references in the model prompt.
     by_id = {f"P{index}": paper for index, paper in enumerate(candidates[:8], start=1)}
     progress("Assessing novelty and comparing related work")
@@ -288,8 +306,10 @@ async def check_research_idea_novelty(title: str, text: str) -> IdeaNoveltyRepor
         papers.append(SimilarPaper(**record, **details, highlights=highlights))
 
     source_records = [paper.model_dump() for paper in papers]
+    evidence_started = monitor.start("idea_evidence")
     await check_full_text(source_records, "\n".join([title, analysis.problem_statement,
         analysis.proposed_methodology, *analysis.research_objectives]))
+    monitor.finish("idea_evidence", evidence_started)
     papers = [SimilarPaper.model_validate(record) for record in source_records]
 
     if len(text) > 10000:
@@ -299,6 +319,7 @@ async def check_research_idea_novelty(title: str, text: str) -> IdeaNoveltyRepor
     if failed:
         result.assessment.observations.append("Indexes unavailable: " + ", ".join(failed) + ".")
     return IdeaNoveltyReport(
+        langfuse_trace_id=monitor.trace_id,
         report_id=f"idea-{uuid.uuid4().hex[:8]}",
         title=title or text.splitlines()[0][:100],
         submitted_idea_preview=text[:600],

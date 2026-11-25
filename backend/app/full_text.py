@@ -12,7 +12,7 @@ from pydantic import BaseModel, Field
 
 from .llm import ModelUnavailable, complete
 from .progress import progress
-from .schemas import FullTextEvidence, FullTextPassage
+from .schemas import AbstractPassage, FullTextEvidence, FullTextPassage
 
 logger = logging.getLogger(__name__)
 
@@ -103,6 +103,25 @@ def _passages(data: bytes, subject: str) -> list[dict]:
     return selected
 
 
+def abstract_passages(abstract: str, subject: str) -> list[AbstractPassage]:
+    """Locate exact source sentences that share specific terms with the submission."""
+    ignored = {
+        "about", "after", "across", "based", "between", "different", "method", "methods",
+        "paper", "propose", "research", "results", "study", "their", "these", "using", "which",
+    }
+    terms = set(re.findall(r"[^\W\d_]{5,}", subject.casefold())) - ignored
+    ranked = []
+    seen = set()
+    for sentence in re.split(r"(?<=[.!?])\s+|\n\s*\n", abstract.strip()):
+        # Keep a contiguous span even if a publisher supplies an unusually long sentence.
+        quote = sentence.strip()[:480].rstrip()
+        shared = sorted(terms & set(re.findall(r"[^\W\d_]{5,}", quote.casefold())))
+        if shared and quote not in seen:
+            ranked.append(AbstractPassage(quote=quote, shared_terms=shared[:8]))
+            seen.add(quote)
+    return sorted(ranked, key=lambda item: -len(item.shared_terms))[:2]
+
+
 class _EvidenceItem(BaseModel):
     passage_id: str
     comparison: str
@@ -119,6 +138,7 @@ async def check_full_text(sources: list[dict], subject: str) -> None:
         url = supported_pdf(source.get("pdf_url"), source.get("url"))
         source["full_text_evidence"] = FullTextEvidence(
             status="abstract_only", pdf_url=url,
+            abstract_passages=abstract_passages(source.get("abstract") or "", subject),
             note="This PDF was outside the full-text review shortlist." if url
             else "The literature index did not provide a PDF on a supported open repository.",
         )
@@ -161,9 +181,7 @@ async def check_full_text(sources: list[dict], subject: str) -> None:
                 max_output_tokens=850,
             )
         except ModelUnavailable:
-            source["full_text_evidence"] = FullTextEvidence(
-                status="abstract_only", pdf_url=url, note="The local model could not validate full-text evidence.",
-            )
+            source["full_text_evidence"].note = "The model could not verify passages from this PDF."
             continue
         by_id = {item["passage_id"]: item for item in passages}
         verified = []
@@ -174,6 +192,7 @@ async def check_full_text(sources: list[dict], subject: str) -> None:
         source["full_text_evidence"] = FullTextEvidence(
             status="full_text_evidence" if verified else "abstract_only",
             pdf_url=url, passages=verified,
+            abstract_passages=source["full_text_evidence"].abstract_passages,
             note="Citations use PDF page numbers. The similarity score remains abstract-based."
             if verified else "The retrieved PDF excerpts did not yield a verified comparison.",
         )

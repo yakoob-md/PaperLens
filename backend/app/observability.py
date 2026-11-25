@@ -75,7 +75,7 @@ class AgentCallbackHandler:
 class RunMonitor:
     """Central observability tracer capturing events, timing, and Langfuse audit traces."""
     
-    def __init__(self):
+    def __init__(self, trace_name: str = "paperlens_review"):
         self.events: list[PipelineEvent] = []
         self.usage: list[ModelUsage] = []
         self.langfuse = optional_langfuse()
@@ -87,7 +87,7 @@ class RunMonitor:
         if self.langfuse:
             try:
                 self.trace = self.langfuse.start_observation(
-                    name="paperlens_review",
+                    name=trace_name,
                     as_type="span",
                 )
             except Exception:
